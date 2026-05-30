@@ -1,28 +1,81 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { AgentSummary, GROUP_ORDER, ResourceDef, ResourcesPayload } from '@/lib/resources/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AgentSummary, ResourceDef, ResourcesPayload } from '@/lib/resources/types';
 
-const KIND_LABEL: Record<string, string> = {
-  tool: 'TOOL',
-  canon: 'CANON',
-  memory: 'MEMORY',
-  file: 'FILE',
-};
+// Map a resource onto a "cover label" — the 3–5 character text printed on its
+// book-spine thumbnail. Mirrors the mockup's BOOK / MD / WEB / DATA / FILE
+// labels so each resource gets a recognizable visual signature.
+function coverLabel(r: ResourceDef): string {
+  if (r.kind === 'canon') return 'BOOK';
+  if (r.kind === 'tool') return 'TOOL';
+  if (r.kind === 'memory') return 'DATA';
+  if (r.kind === 'file') {
+    const src = (r.source ?? 'FILE').toUpperCase();
+    // common file kinds → short label
+    if (src === 'NOTE' || src === 'BRIEF' || src === 'MEMO') return 'MD';
+    if (src === 'DATA' || src === 'CSV' || src === 'JSON') return 'DATA';
+    if (src === 'PDF') return 'PDF';
+    if (src === 'DOC' || src === 'DOCX') return 'DOC';
+    return src.slice(0, 4);
+  }
+  return 'FILE';
+}
 
-const AGENT_GROUPS: Array<{ kind: AgentSummary['kind']; label: string; note: string }> = [
-  { kind: 'roster', label: 'FOUNDATIONAL ROSTER', note: 'permanent — runs on every relevant problem' },
-  { kind: 'library', label: 'SPECIALIST LIBRARY', note: 'deployed per-problem by the Chief of Staff' },
-  { kind: 'custom', label: 'YOUR CUSTOM AGENTS', note: 'founder-made specialists' },
-];
+// Pretty role label for the agent pill header.
+function roleLabel(a: AgentSummary): string {
+  if (a.kind === 'roster') {
+    if (a.id === 'founder') return 'TIER 0 · IDENTITY';
+    if (a.tier === 'governance') return 'PARALLEL · GOVERNANCE';
+    if (a.tier === 'leadership') return 'TIER 1 · LEADERSHIP';
+    if (a.tier === 'execution') return 'TIER 2 · EXECUTION';
+    return 'FOUNDATIONAL';
+  }
+  if (a.kind === 'library') return 'SUMMONED · COMPANY';
+  return 'YOUR CUSTOM';
+}
+
+// Single, ordered list of agents (foundational roster → library → custom) with
+// thin section labels woven in. Renders to a flat grid that wraps naturally.
+function buildAgentOrder(agents: AgentSummary[]): Array<
+  | { kind: 'sep'; label: string; note: string; key: string }
+  | { kind: 'agent'; agent: AgentSummary; key: string }
+> {
+  const roster = agents.filter((a) => a.kind === 'roster');
+  const library = agents.filter((a) => a.kind === 'library');
+  const custom = agents.filter((a) => a.kind === 'custom');
+  const out: Array<
+    | { kind: 'sep'; label: string; note: string; key: string }
+    | { kind: 'agent'; agent: AgentSummary; key: string }
+  > = [];
+  if (roster.length) {
+    out.push({ kind: 'sep', label: 'FOUNDATIONAL ROSTER', note: 'permanent · runs every relevant problem', key: 'sep-roster' });
+    for (const a of roster) out.push({ kind: 'agent', agent: a, key: `a-${a.id}` });
+  }
+  if (library.length) {
+    out.push({ kind: 'sep', label: 'SPECIALIST LIBRARY', note: 'deployed per-problem by the Chief of Staff', key: 'sep-library' });
+    for (const a of library) out.push({ kind: 'agent', agent: a, key: `a-${a.id}` });
+  }
+  if (custom.length) {
+    out.push({ kind: 'sep', label: 'YOUR CUSTOM AGENTS', note: 'founder-made specialists', key: 'sep-custom' });
+    for (const a of custom) out.push({ kind: 'agent', agent: a, key: `a-${a.id}` });
+  }
+  return out;
+}
+
+interface DragPayload {
+  kind: 'lib' | 'move';
+  resourceId: string;
+  fromAgentId?: string; // only for 'move'
+}
 
 export default function ResourcesBoard({ initial }: { initial: ResourcesPayload }) {
   const [resources, setResources] = useState<ResourceDef[]>(initial.resources);
   const [assignments, setAssignments] = useState<Record<string, string[]>>(initial.assignments);
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragPayload, setDragPayload] = useState<DragPayload | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);
+  const [showFileForm, setShowFileForm] = useState(false);
 
   const { signedIn, persisted, agents } = initial;
   const canEdit = signedIn && persisted;
@@ -33,23 +86,34 @@ export default function ResourcesBoard({ initial }: { initial: ResourcesPayload 
     return m;
   }, [resources]);
 
-  const openAgent = openId ? agents.find((a) => a.id === openId) ?? null : null;
+  // Toggle a body class while any drag is in progress so every empty card
+  // shows the dashed cue (matches the mockup's body.dragging selector).
+  useEffect(() => {
+    if (dragPayload) document.body.classList.add('res-dragging');
+    else document.body.classList.remove('res-dragging');
+    return () => document.body.classList.remove('res-dragging');
+  }, [dragPayload]);
+
+  const totalAttached = useMemo(
+    () => Object.values(assignments).reduce((sum, ids) => sum + ids.length, 0),
+    [assignments],
+  );
 
   function flash(text: string, ok: boolean) {
     setToast({ text, ok });
-    setTimeout(() => setToast(null), ok ? 2200 : 3800);
+    window.setTimeout(() => setToast(null), ok ? 2200 : 3800);
   }
 
-  async function assign(agentId: string, resourceId: string, add: boolean) {
+  // ── persistence: assign / unassign a resource to an agent ─────────────
+  async function persistAssign(agentId: string, resourceId: string, add: boolean) {
     if (!canEdit) {
       flash(signedIn ? 'Storage not ready — apply migration 0002' : 'Sign in to assign resources', false);
-      return;
+      return false;
     }
     const current = assignments[agentId] ?? [];
-    if (add && current.includes(resourceId)) return;
-    if (!add && !current.includes(resourceId)) return;
+    if (add && current.includes(resourceId)) return true;
+    if (!add && !current.includes(resourceId)) return true;
 
-    // Optimistic update.
     const next = add ? [...current, resourceId] : current.filter((id) => id !== resourceId);
     setAssignments((prev) => ({ ...prev, [agentId]: next }));
 
@@ -61,34 +125,97 @@ export default function ResourcesBoard({ initial }: { initial: ResourcesPayload 
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error ?? 'failed');
+      return true;
     } catch (e) {
-      // Revert.
+      // Revert optimistic update.
       setAssignments((prev) => ({ ...prev, [agentId]: current }));
       flash(e instanceof Error ? e.message : 'Failed to save', false);
+      return false;
     }
   }
 
-  function onDrop(agentId: string) {
+  // ── handle a drop on an agent card ────────────────────────────────────
+  // Three drop sources: shelf item (lib), tile from another card (move),
+  // and an OS-level file from the desktop (text-only; gets uploaded then
+  // assigned in one shot so it lands as a tile on that card immediately).
+  async function handleDrop(agentId: string, e: React.DragEvent) {
+    e.preventDefault();
     setDropTarget(null);
-    const id = dragId;
-    setDragId(null);
-    if (id) assign(agentId, id, true);
+    setDragPayload(null);
+
+    // Desktop file drop — read text content and POST to /api/resources/files,
+    // then assign the new resource to this agent.
+    if (e.dataTransfer.files?.length) {
+      if (!canEdit) {
+        flash(signedIn ? 'Storage not ready — apply migration 0002' : 'Sign in to upload files', false);
+        return;
+      }
+      const f = e.dataTransfer.files[0];
+      // We only persist text content. Binary files are flagged and skipped.
+      const isText = !f.type || f.type.startsWith('text/') || /\.(md|markdown|txt|json|csv|ya?ml)$/i.test(f.name);
+      if (!isText) {
+        flash(`Skipped ${f.name} — only text files (md, txt, json, csv, yaml) are stored.`, false);
+        return;
+      }
+      try {
+        const content = await f.text();
+        const kindGuess =
+          /\.md$|\.markdown$/i.test(f.name) ? 'note' :
+          /\.csv$|\.json$/i.test(f.name) ? 'data' :
+          /\.ya?ml$/i.test(f.name) ? 'config' : 'note';
+        const res = await fetch('/api/resources/files', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: f.name, content, kind: kindGuess }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(d.error ?? 'upload failed');
+        const newDef: ResourceDef = {
+          id: d.resourceId,
+          kind: 'file',
+          title: f.name,
+          group: 'Your Files',
+          color: '#a855f7',
+          description: `${kindGuess} · ${content.length.toLocaleString()} chars`,
+          detail: content.slice(0, 200),
+          source: kindGuess,
+        };
+        setResources((prev) => [...prev, newDef]);
+        await persistAssign(agentId, newDef.id, true);
+        flash(`Attached ${f.name}`, true);
+      } catch (err) {
+        flash(err instanceof Error ? err.message : 'Upload failed', false);
+      }
+      return;
+    }
+
+    // Internal drag (shelf chip or tile being moved between cards).
+    const payload = dragPayload;
+    if (!payload) return;
+    if (payload.kind === 'lib') {
+      await persistAssign(agentId, payload.resourceId, true);
+    } else if (payload.kind === 'move' && payload.fromAgentId && payload.fromAgentId !== agentId) {
+      // Move = add to new, remove from old. We add first so the resource
+      // never appears "lost" if the second call fails.
+      const added = await persistAssign(agentId, payload.resourceId, true);
+      if (added) await persistAssign(payload.fromAgentId, payload.resourceId, false);
+    }
   }
 
-  function addFile(def: ResourceDef) {
-    setResources((prev) => [...prev, def]);
+  async function removeTile(agentId: string, resourceId: string) {
+    await persistAssign(agentId, resourceId, false);
   }
 
-  async function removeFile(fileId: string) {
-    const resourceId = `file:${fileId}`;
+  async function deleteFile(fileResourceId: string) {
+    const id = fileResourceId.startsWith('file:') ? fileResourceId.slice(5) : fileResourceId;
     try {
-      const res = await fetch(`/api/resources/files?id=${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+      const res = await fetch(`/api/resources/files?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error ?? 'failed');
-      setResources((prev) => prev.filter((r) => r.id !== resourceId));
+      setResources((prev) => prev.filter((r) => r.id !== fileResourceId));
       setAssignments((prev) => {
         const out: Record<string, string[]> = {};
-        for (const [aid, ids] of Object.entries(prev)) out[aid] = ids.filter((x) => x !== resourceId);
+        for (const [aid, ids] of Object.entries(prev)) out[aid] = ids.filter((x) => x !== fileResourceId);
         return out;
       });
       flash('File removed', true);
@@ -97,180 +224,230 @@ export default function ResourcesBoard({ initial }: { initial: ResourcesPayload 
     }
   }
 
+  // Ordered agent list with section separators between groups.
+  const ordered = useMemo(() => buildAgentOrder(agents), [agents]);
+
   return (
     <div className="max-w-6xl mx-auto p-6">
-      {/* Header */}
-      <div className="mb-5">
-        <h1 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f59e0b', letterSpacing: '0.1em' }}>RESOURCES</h1>
-        <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.6, maxWidth: 720 }}>
-          Grant tools, knowledge, memory, and your own files to any agent. Grants are <b style={{ color: 'var(--text-primary)' }}>additive preferences</b>, never
-          fences — an agent leans on what it&apos;s given when relevant, and still reaches for whatever else a problem needs. Drag a chip onto a card, or click a
-          card to manage it.
+      {/* Page header */}
+      <div className="res-head">
+        <div className="eyebrow">/resources</div>
+        <h1>Hand each agent its own <em>library</em>.</h1>
+        <p className="sub">
+          Drag a book, a markdown doc, a tool, or a memory store onto any agent — or drop a text
+          file straight off your desktop. Whatever you attach becomes context that agent carries
+          into every run. Grants are additive preferences, never fences.
         </p>
       </div>
 
       {!signedIn && (
-        <Banner color="#f59e0b">
+        <div className="res-banner" style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)', color: '#f59e0b' }}>
           Sign in to assign resources. You&apos;re viewing the catalog read-only.
-        </Banner>
+        </div>
       )}
       {signedIn && !persisted && (
-        <Banner color="#ef4444">
-          The resource store isn&apos;t available yet — apply migration <code style={codeStyle}>0002_resources.sql</code>. Assignments won&apos;t persist until then.
-        </Banner>
+        <div className="res-banner" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.35)', color: '#ef4444' }}>
+          The resource store isn&apos;t available yet — apply migration <code>0002_resources.sql</code>. Assignments won&apos;t persist until then.
+        </div>
       )}
 
-      <div className="flex gap-5" style={{ alignItems: 'flex-start' }}>
-        {/* ── Palette ─────────────────────────────────────────────── */}
-        <aside style={{ width: 300, flexShrink: 0, position: 'sticky', top: 12 }}>
-          <SectionLabel>RESOURCE PALETTE</SectionLabel>
-          <p style={{ fontSize: '0.52rem', color: 'var(--text-dim)', margin: '4px 0 10px', lineHeight: 1.5 }}>
-            Drag any chip onto an agent card to grant it.
-          </p>
-          {GROUP_ORDER.map((group) => {
-            const items = resources.filter((r) => r.group === group);
-            if (group !== 'Your Files' && items.length === 0) return null;
+      {/* Resource shelf */}
+      <section className="res-shelf" style={{ marginTop: 18 }}>
+        <div className="res-shelf-head">
+          <div className="lbl">
+            <span className="bar" />
+            Resource shelf — drag onto an agent
+          </div>
+          <div className="hint">
+            <b>＋</b> or drop a text file from your desktop onto a card
+          </div>
+        </div>
+
+        <div className="res-shelf-items">
+          {resources.map((r) => (
+            <ShelfItem
+              key={r.id}
+              r={r}
+              canDrag={canEdit}
+              onDragStart={() => setDragPayload({ kind: 'lib', resourceId: r.id })}
+              onDragEnd={() => { setDragPayload(null); setDropTarget(null); }}
+              onDelete={r.kind === 'file' ? () => deleteFile(r.id) : undefined}
+            />
+          ))}
+
+          {/* Add-file action (inline form expands beneath the shelf) */}
+          {!showFileForm && (
+            <button
+              type="button"
+              className="res-add-file"
+              onClick={() => setShowFileForm(true)}
+              disabled={!canEdit}
+              title={canEdit ? 'Add a text file' : 'Sign in & apply migration to add files'}
+            >
+              <div className="plus">+</div>
+              <div className="meta-wrap">
+                <div className="nm" style={{ color: 'rgba(168,85,247,0.95)' }}>Add a file</div>
+                <div className="a-meta">NOTE · BRIEF · DATA</div>
+              </div>
+            </button>
+          )}
+        </div>
+
+        {showFileForm && (
+          <FileForm
+            onCancel={() => setShowFileForm(false)}
+            onCreated={(def) => { setResources((prev) => [...prev, def]); setShowFileForm(false); }}
+            onError={(m) => flash(m, false)}
+          />
+        )}
+
+        {/* Type legend */}
+        <div className="res-types-legend">
+          <span className="lg"><span className="sw" style={{ background: '#f59e0b' }} />BOOK · CANON</span>
+          <span className="lg"><span className="sw" style={{ background: '#06b6d4' }} />TOOL · LIVE</span>
+          <span className="lg"><span className="sw" style={{ background: '#8b5cf6' }} />DATA · MEMORY</span>
+          <span className="lg"><span className="sw" style={{ background: '#a855f7' }} />FILE · YOUR UPLOAD</span>
+        </div>
+      </section>
+
+      {/* Agents grid */}
+      <section className="res-agents-grid">
+        {ordered.map((row) => {
+          if (row.kind === 'sep') {
             return (
-              <div key={group} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: '0.5rem', color: 'var(--text-dim)', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 6 }}>
-                  {group.toUpperCase()}
+              <div key={row.key} className="res-group-bar">
+                <span>{row.label}</span>
+                <span className="note">{row.note}</span>
+                <span className="bar" />
+              </div>
+            );
+          }
+          const a = row.agent;
+          const ids = assignments[a.id] ?? [];
+          const granted = ids.map((id) => byId.get(id)).filter(Boolean) as ResourceDef[];
+          const isTarget = dropTarget === a.id;
+          const hasItems = granted.length > 0;
+          return (
+            <div
+              key={row.key}
+              className={`res-agent-card ${hasItems ? 'has-items' : ''} ${isTarget ? 'drop-active' : ''}`}
+              onDragEnter={(e) => { e.preventDefault(); setDropTarget(a.id); }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (e.dataTransfer.types.includes('Files')) e.dataTransfer.dropEffect = 'copy';
+                else e.dataTransfer.dropEffect = dragPayload?.kind === 'move' ? 'move' : 'copy';
+              }}
+              onDragLeave={(e) => {
+                // Only clear when we leave the card entirely, not when moving
+                // between child elements (relatedTarget contained in card).
+                const target = e.currentTarget;
+                const next = e.relatedTarget as Node | null;
+                if (!next || !target.contains(next)) {
+                  setDropTarget((t) => (t === a.id ? null : t));
+                }
+              }}
+              onDrop={(e) => handleDrop(a.id, e)}
+            >
+              <div className="res-agent-cap" style={{ ['--ac' as string]: a.color } as React.CSSProperties}>
+                <span className="hex" />
+                <div className="id">
+                  <div className="nm">{a.title.toUpperCase()}</div>
+                  <div className="rl">{roleLabel(a)}</div>
                 </div>
-                <div className="flex flex-col gap-1.5">
-                  {items.map((r) => (
-                    <PaletteChip
+                <div className="count"><b>{granted.length}</b> attached</div>
+              </div>
+
+              <div className="res-agent-body">
+                <div className="res-empty">
+                  <div className="ehex" />
+                  <div className="et">Empty shelf</div>
+                  <div className="eh">drop a tool · book · markdown · or text file here</div>
+                </div>
+
+                <div className="res-tiles">
+                  {granted.map((r) => (
+                    <Tile
                       key={r.id}
                       r={r}
-                      draggable={canEdit}
-                      onDragStart={() => setDragId(r.id)}
-                      onDragEnd={() => { setDragId(null); setDropTarget(null); }}
-                      onRemove={r.kind === 'file' ? () => removeFile(r.id.slice('file:'.length)) : undefined}
+                      canDrag={canEdit}
+                      onDragStart={() => setDragPayload({ kind: 'move', resourceId: r.id, fromAgentId: a.id })}
+                      onDragEnd={() => { setDragPayload(null); setDropTarget(null); }}
+                      onRemove={() => removeTile(a.id, r.id)}
                     />
                   ))}
-                  {group === 'Your Files' && items.length === 0 && (
-                    <div style={{ fontSize: '0.52rem', color: 'var(--text-dim)', fontStyle: 'italic' }}>No files yet.</div>
-                  )}
-                  {group === 'Your Files' && <FileUpload disabled={!canEdit} onCreated={addFile} onError={(m) => flash(m, false)} />}
                 </div>
               </div>
-            );
-          })}
-        </aside>
+            </div>
+          );
+        })}
+      </section>
 
-        {/* ── Agent board ─────────────────────────────────────────── */}
-        <div className="flex-1 min-w-0">
-          {AGENT_GROUPS.map(({ kind, label, note }) => {
-            const list = agents.filter((a) => a.kind === kind);
-            if (list.length === 0) return null;
-            return (
-              <div key={kind} style={{ marginBottom: 20 }}>
-                <div style={{ marginBottom: 10 }}>
-                  <span style={{ fontSize: '0.55rem', color: 'var(--text-dim)', letterSpacing: '0.14em', fontWeight: 700 }}>{label}</span>
-                  <span style={{ fontSize: '0.5rem', color: 'var(--text-dim)', fontWeight: 400 }}> · {note}</span>
-                </div>
-                <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
-                  {list.map((a) => (
-                    <AgentCard
-                      key={a.id}
-                      agent={a}
-                      grantedIds={assignments[a.id] ?? []}
-                      byId={byId}
-                      isDropTarget={dropTarget === a.id}
-                      dragging={!!dragId}
-                      onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTarget(a.id); } }}
-                      onDragLeave={() => setDropTarget((t) => (t === a.id ? null : t))}
-                      onDrop={() => onDrop(a.id)}
-                      onOpen={() => setOpenId(a.id)}
-                      onRemove={(rid) => assign(a.id, rid, false)}
-                    />
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+      <div className="res-foot">
+        <span>
+          {totalAttached} resource{totalAttached === 1 ? '' : 's'} attached across {agents.length} agent{agents.length === 1 ? '' : 's'}
+        </span>
+        <span className="dot">·</span>
+        <span>{resources.length} item{resources.length === 1 ? '' : 's'} on the shelf</span>
       </div>
 
-      {/* ── Full agent panel ──────────────────────────────────────── */}
-      {openAgent && (
-        <AgentPanel
-          agent={openAgent}
-          grantedIds={assignments[openAgent.id] ?? []}
-          resources={resources}
-          canEdit={canEdit}
-          onClose={() => setOpenId(null)}
-          onToggle={(rid, add) => assign(openAgent.id, rid, add)}
-        />
-      )}
-
-      {/* Toast */}
       {toast && (
-        <div
-          className="slide-in"
-          style={{
-            position: 'fixed', bottom: 20, left: '50%', transform: 'translateX(-50%)',
-            background: 'var(--bg-elevated)', border: `1px solid ${toast.ok ? 'rgba(16,185,129,0.4)' : 'rgba(239,68,68,0.4)'}`,
-            color: toast.ok ? '#10b981' : '#ef4444', fontSize: '0.58rem', padding: '8px 16px', borderRadius: 6,
-            zIndex: 100, boxShadow: '0 8px 24px rgba(0,0,0,0.5)', letterSpacing: '0.04em',
-          }}
-        >
-          {toast.text}
-        </div>
+        <div className={`res-toast slide-in ${toast.ok ? 'ok' : 'err'}`}>{toast.text}</div>
       )}
     </div>
   );
 }
 
-// ─── Pieces ──────────────────────────────────────────────────────────
-
-const codeStyle = { fontFamily: 'inherit', fontSize: '0.55rem', background: 'rgba(251,245,221,0.06)', border: '1px solid var(--border)', padding: '0 4px', borderRadius: 3 } as const;
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', letterSpacing: '0.12em' }}>{children}</div>;
-}
-
-function Banner({ color, children }: { color: string; children: React.ReactNode }) {
-  return (
-    <div
-      className="rounded-md mb-4"
-      style={{ background: `${color}14`, border: `1px solid ${color}40`, color, fontSize: '0.58rem', padding: '8px 12px', lineHeight: 1.5 }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function PaletteChip({
-  r, draggable, onDragStart, onDragEnd, onRemove,
+// ─────────────────────────────────────────────────────────────────────────
+// Shelf item — small horizontal chip with a book-spine cover and metadata.
+// ─────────────────────────────────────────────────────────────────────────
+function ShelfItem({
+  r,
+  canDrag,
+  onDragStart,
+  onDragEnd,
+  onDelete,
 }: {
-  r: ResourceDef; draggable: boolean; onDragStart: () => void; onDragEnd: () => void; onRemove?: () => void;
+  r: ResourceDef;
+  canDrag: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDelete?: () => void;
 }) {
+  const label = coverLabel(r);
   return (
     <div
-      draggable={draggable}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      title={r.detail ?? r.description}
-      style={{
-        position: 'relative', display: 'flex', alignItems: 'stretch', gap: 8,
-        background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 6,
-        padding: '7px 9px 7px 0', cursor: draggable ? 'grab' : 'default', overflow: 'hidden',
+      className={`res-lib ${canDrag ? '' : 'disabled'}`}
+      draggable={canDrag}
+      onDragStart={(e) => {
+        if (!canDrag) { e.preventDefault(); return; }
+        e.dataTransfer.effectAllowed = 'copy';
+        e.dataTransfer.setData('text/plain', r.title);
+        e.currentTarget.classList.add('dragging');
+        onDragStart();
       }}
+      onDragEnd={(e) => {
+        e.currentTarget.classList.remove('dragging');
+        onDragEnd();
+      }}
+      title={r.detail ?? r.description}
     >
-      <div style={{ width: 3, background: r.color, flexShrink: 0 }} />
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div className="flex items-center gap-1.5" style={{ marginBottom: 1 }}>
-          <span style={{ fontSize: '0.45rem', fontWeight: 700, letterSpacing: '0.1em', color: r.color }}>{KIND_LABEL[r.kind]}</span>
-          <span style={{ fontSize: '0.62rem', fontWeight: 700, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.title}</span>
-        </div>
-        <div style={{ fontSize: '0.5rem', color: 'var(--text-muted)', lineHeight: 1.4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+      <div className="cover" style={{ ['--cc' as string]: r.color, width: 30, height: 40, borderRadius: 4 } as React.CSSProperties}>
+        <span className="mg">{label}</span>
+        <span className="fold" />
+      </div>
+      <div className="meta-wrap">
+        <div className="nm">{r.title}</div>
+        <div className="mt">
+          <span className="ty" style={{ ['--tc' as string]: r.color } as React.CSSProperties}>{label}</span>
           {r.description}
         </div>
       </div>
-      {onRemove && (
+      {onDelete && (
         <button
-          onClick={onRemove}
+          type="button"
+          className="rmf"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
           title="Delete file"
-          style={{ alignSelf: 'center', marginRight: 6, fontSize: '0.6rem', color: 'var(--text-dim)', background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}
         >
           ✕
         </button>
@@ -279,185 +456,81 @@ function PaletteChip({
   );
 }
 
-function AgentCard({
-  agent, grantedIds, byId, isDropTarget, dragging, onDragOver, onDragLeave, onDrop, onOpen, onRemove,
+// ─────────────────────────────────────────────────────────────────────────
+// Tile — small vertical book cover used inside agent cards. Draggable so a
+// resource can be moved from one agent's shelf to another's.
+// ─────────────────────────────────────────────────────────────────────────
+function Tile({
+  r,
+  canDrag,
+  onDragStart,
+  onDragEnd,
+  onRemove,
 }: {
-  agent: AgentSummary;
-  grantedIds: string[];
-  byId: Map<string, ResourceDef>;
-  isDropTarget: boolean;
-  dragging: boolean;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: () => void;
-  onDrop: () => void;
-  onOpen: () => void;
-  onRemove: (resourceId: string) => void;
+  r: ResourceDef;
+  canDrag: boolean;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onRemove: () => void;
 }) {
-  const granted = grantedIds.map((id) => byId.get(id)).filter(Boolean) as ResourceDef[];
+  const label = coverLabel(r);
   return (
     <div
-      onClick={onOpen}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-      className="rounded-lg p-3"
-      style={{
-        background: 'var(--bg-panel)',
-        border: `1px solid ${isDropTarget ? agent.color : dragging ? 'var(--border-bright)' : 'var(--border)'}`,
-        boxShadow: isDropTarget ? `0 0 0 1px ${agent.color}` : 'none',
-        cursor: 'pointer', transition: 'border-color 150ms, box-shadow 150ms',
+      className="res-tile"
+      draggable={canDrag}
+      onDragStart={(e) => {
+        if (!canDrag) { e.preventDefault(); return; }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', r.title);
+        e.currentTarget.classList.add('dragging');
+        onDragStart();
       }}
+      onDragEnd={(e) => {
+        e.currentTarget.classList.remove('dragging');
+        onDragEnd();
+      }}
+      title={r.detail ?? r.description}
     >
-      <div className="flex items-center justify-between mb-1">
-        <div className="flex items-center gap-2 min-w-0">
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: agent.color, flexShrink: 0 }} />
-          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: agent.color, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.title}</span>
-        </div>
-        <span style={{ fontSize: '0.48rem', color: 'var(--text-dim)', flexShrink: 0 }}>
-          {granted.length > 0 ? `${granted.length} granted` : 'none'}
-        </span>
-      </div>
-      <p style={{ fontSize: '0.56rem', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 8, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-        {agent.mandate}
-      </p>
-
-      <div
-        className="flex flex-wrap gap-1"
-        style={{
-          minHeight: granted.length ? undefined : 30,
-          borderTop: '1px solid var(--border)', paddingTop: 8,
-        }}
+      <button
+        type="button"
+        className="rm"
+        onClick={(e) => { e.stopPropagation(); onRemove(); }}
+        title="Remove"
       >
-        {granted.length === 0 ? (
-          <span style={{ fontSize: '0.5rem', color: 'var(--text-dim)', fontStyle: 'italic' }}>
-            {agent.needsLiveData ? 'No grants — searches the web by default' : 'Drag a resource here'}
-          </span>
-        ) : (
-          granted.map((r) => (
-            <span
-              key={r.id}
-              className="inline-flex items-center gap-1"
-              style={{ fontSize: '0.5rem', color: 'var(--text-primary)', background: `${r.color}1a`, border: `1px solid ${r.color}55`, borderRadius: 3, padding: '1px 4px' }}
-            >
-              <span style={{ width: 5, height: 5, borderRadius: '50%', background: r.color }} />
-              {r.title}
-              <button
-                onClick={(e) => { e.stopPropagation(); onRemove(r.id); }}
-                title="Remove"
-                style={{ fontSize: '0.55rem', color: 'var(--text-dim)', background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit', lineHeight: 1, padding: 0 }}
-              >
-                ✕
-              </button>
-            </span>
-          ))
-        )}
+        ×
+      </button>
+      <div className="cover" style={{ ['--cc' as string]: r.color } as React.CSSProperties}>
+        <span className="mg">{label}</span>
+        <span className="fold" />
       </div>
+      <div className="t-name">{r.title}</div>
+      <div className="t-type" style={{ ['--tc' as string]: r.color } as React.CSSProperties}>{label}</div>
     </div>
   );
 }
 
-function AgentPanel({
-  agent, grantedIds, resources, canEdit, onClose, onToggle,
+// ─────────────────────────────────────────────────────────────────────────
+// Inline file upload form — sits below the shelf when open.
+// ─────────────────────────────────────────────────────────────────────────
+function FileForm({
+  onCancel,
+  onCreated,
+  onError,
 }: {
-  agent: AgentSummary;
-  grantedIds: string[];
-  resources: ResourceDef[];
-  canEdit: boolean;
-  onClose: () => void;
-  onToggle: (resourceId: string, add: boolean) => void;
+  onCancel: () => void;
+  onCreated: (def: ResourceDef) => void;
+  onError: (m: string) => void;
 }) {
-  const grantedSet = new Set(grantedIds);
-  return (
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 90, display: 'flex', justifyContent: 'flex-end' }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="slide-in"
-        style={{
-          width: 420, maxWidth: '92vw', height: '100%', overflowY: 'auto',
-          background: 'var(--bg-surface)', borderLeft: '1px solid var(--border-bright)', padding: 20,
-        }}
-      >
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex items-center gap-2 min-w-0">
-            <div style={{ width: 9, height: 9, borderRadius: '50%', background: agent.color, flexShrink: 0 }} />
-            <div className="min-w-0">
-              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: agent.color }}>{agent.title}</div>
-              <div style={{ fontSize: '0.48rem', color: 'var(--text-dim)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                {agent.kind}{agent.tier ? ` · ${agent.tier}` : ''}{agent.domain ? ` · ${agent.domain}` : ''}
-              </div>
-            </div>
-          </div>
-          <button onClick={onClose} style={{ fontSize: '0.7rem', color: 'var(--text-muted)', background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>✕</button>
-        </div>
-
-        <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 6 }}>{agent.mandate}</p>
-        <p style={{ fontSize: '0.52rem', color: 'var(--text-dim)', lineHeight: 1.55, marginBottom: 16 }}>
-          {agent.needsLiveData
-            ? 'This agent searches the web by default. Grants below are added on top — it uses them when relevant and still reaches for anything else a problem needs.'
-            : 'Grants are additive. This agent uses what you give it when relevant, and still reaches for whatever else the problem needs.'}
-        </p>
-
-        {GROUP_ORDER.map((group) => {
-          const items = resources.filter((r) => r.group === group);
-          if (items.length === 0) return null;
-          return (
-            <div key={group} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: '0.5rem', color: 'var(--text-dim)', letterSpacing: '0.12em', fontWeight: 700, marginBottom: 6 }}>{group.toUpperCase()}</div>
-              <div className="flex flex-col gap-1.5">
-                {items.map((r) => {
-                  const on = grantedSet.has(r.id);
-                  return (
-                    <button
-                      key={r.id}
-                      onClick={() => canEdit && onToggle(r.id, !on)}
-                      disabled={!canEdit}
-                      style={{
-                        display: 'flex', alignItems: 'stretch', gap: 8, textAlign: 'left',
-                        background: on ? `${r.color}14` : 'var(--bg-panel)',
-                        border: `1px solid ${on ? `${r.color}66` : 'var(--border)'}`,
-                        borderRadius: 6, padding: '7px 10px 7px 0', cursor: canEdit ? 'pointer' : 'default',
-                        fontFamily: 'inherit', overflow: 'hidden',
-                      }}
-                    >
-                      <div style={{ width: 3, background: r.color, flexShrink: 0 }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="flex items-center gap-1.5">
-                          <span style={{ fontSize: '0.45rem', fontWeight: 700, letterSpacing: '0.1em', color: r.color }}>{KIND_LABEL[r.kind]}</span>
-                          <span style={{ fontSize: '0.62rem', fontWeight: 700, color: 'var(--text-primary)' }}>{r.title}</span>
-                        </div>
-                        <div style={{ fontSize: '0.52rem', color: 'var(--text-muted)', lineHeight: 1.45, marginTop: 2 }}>{r.detail ?? r.description}</div>
-                      </div>
-                      <span style={{ alignSelf: 'center', marginRight: 8, fontSize: '0.55rem', fontWeight: 700, color: on ? r.color : 'var(--text-dim)', whiteSpace: 'nowrap' }}>
-                        {on ? 'GRANTED' : '+ GRANT'}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function FileUpload({ disabled, onCreated, onError }: { disabled: boolean; onCreated: (def: ResourceDef) => void; onError: (m: string) => void }) {
-  const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [kind, setKind] = useState('note');
   const [content, setContent] = useState('');
   const [busy, setBusy] = useState(false);
+  const firstField = useRef<HTMLInputElement | null>(null);
 
-  const input = {
-    width: '100%', background: 'var(--bg-base)', border: '1px solid var(--border-bright)', borderRadius: 5,
-    padding: '6px 8px', color: 'var(--text-primary)', fontSize: '0.58rem', fontFamily: 'inherit', outline: 'none', marginBottom: 6,
-  } as const;
+  useEffect(() => { firstField.current?.focus(); }, []);
 
   async function submit() {
+    if (!name.trim() || !content.trim()) return;
     setBusy(true);
     try {
       const res = await fetch('/api/resources/files', {
@@ -477,7 +550,7 @@ function FileUpload({ disabled, onCreated, onError }: { disabled: boolean; onCre
         detail: content.slice(0, 200),
         source: kind,
       });
-      setName(''); setContent(''); setKind('note'); setOpen(false);
+      setName(''); setKind('note'); setContent('');
     } catch (e) {
       onError(e instanceof Error ? e.message : 'Upload failed');
     } finally {
@@ -485,40 +558,35 @@ function FileUpload({ disabled, onCreated, onError }: { disabled: boolean; onCre
     }
   }
 
-  if (!open) {
-    return (
-      <button
-        onClick={() => setOpen(true)}
-        disabled={disabled}
-        style={{
-          fontSize: '0.55rem', fontWeight: 700, letterSpacing: '0.06em', color: disabled ? 'var(--text-dim)' : '#a855f7',
-          background: 'rgba(168,85,247,0.08)', border: '1px dashed rgba(168,85,247,0.35)', borderRadius: 6,
-          padding: '7px 10px', cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'inherit', marginTop: 2, width: '100%',
-        }}
-      >
-        + ADD A FILE
-      </button>
-    );
-  }
-
   return (
-    <div className="rounded-md" style={{ background: 'var(--bg-panel)', border: '1px solid rgba(168,85,247,0.3)', padding: 10, marginTop: 2 }}>
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="File name" style={input} />
-      <input value={kind} onChange={(e) => setKind(e.target.value)} placeholder="kind (note, brief, data…)" style={input} />
-      <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={5} placeholder="Paste content — knowledge, data, a brief…" style={{ ...input, resize: 'vertical', lineHeight: 1.5 }} />
-      <div className="flex items-center gap-2">
+    <div className="res-file-form">
+      <input
+        ref={firstField}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="File name (e.g. risk-playbook.md)"
+      />
+      <input
+        value={kind}
+        onChange={(e) => setKind(e.target.value)}
+        placeholder="kind (note · brief · data · config)"
+      />
+      <textarea
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        rows={5}
+        placeholder="Paste content — knowledge, data, a brief…"
+      />
+      <div className="actions">
         <button
+          type="button"
+          className="save"
           onClick={submit}
           disabled={busy || !name.trim() || !content.trim()}
-          style={{
-            fontSize: '0.56rem', fontWeight: 700, letterSpacing: '0.08em',
-            color: busy ? 'var(--text-muted)' : '#06060f', background: busy || !name.trim() || !content.trim() ? 'var(--bg-elevated)' : '#a855f7',
-            border: 'none', borderRadius: 5, padding: '6px 12px', cursor: busy ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-          }}
         >
           {busy ? 'SAVING…' : 'SAVE FILE'}
         </button>
-        <button onClick={() => setOpen(false)} style={{ fontSize: '0.55rem', color: 'var(--text-dim)', background: 'transparent', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>cancel</button>
+        <button type="button" className="cancel" onClick={onCancel}>cancel</button>
       </div>
     </div>
   );

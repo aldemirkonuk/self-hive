@@ -11,6 +11,7 @@ export interface RunSummary {
   classification: string | null;
   agentRoles: string[]; // which agents participated this run
   scores: Record<string, number> | null; // role/title → overall score
+  hasTrainerReport: boolean; // whether a trainer report exists for this run
 }
 
 export interface TrainerHistoryEntry {
@@ -67,6 +68,10 @@ export async function getRecentRuns(userId: string, limit = 20): Promise<RunSumm
     }
   });
 
+  // Note: we already fetched `reports` above (run_id + scores) — a row in that
+  // list IS proof a trainer_report exists. No extra query needed.
+  const reportRunIds = new Set((reports ?? []).map((r) => r.run_id));
+
   return runs.map((r) => {
     const scores = scoresByRun.get(r.id) ?? null;
     // Dynamic runs have no artifacts rows — derive participating agents from the
@@ -85,8 +90,37 @@ export async function getRecentRuns(userId: string, limit = 20): Promise<RunSumm
       classification: r.classification ?? null,
       agentRoles,
       scores,
+      hasTrainerReport: reportRunIds.has(r.id),
     };
   });
+}
+
+/**
+ * Fetch one trainer report for a single run. RLS on `trainer_reports` is
+ * enforced via the same session-scoped client used elsewhere — a user can
+ * only ever read reports for their own runs.
+ */
+export interface TrainerReportRow {
+  rawText: string;
+  scores: Record<string, { overall?: number } & Record<string, number>> | null;
+  patterns: Record<string, unknown> | null;
+  oneThingCompany: string;
+}
+export async function getTrainerReport(runId: string): Promise<TrainerReportRow | null> {
+  if (!isSupabaseConfigured()) return null;
+  const sb = await getServerSupabase();
+  const { data } = await sb
+    .from('trainer_reports')
+    .select('raw_text, scores, patterns, one_thing_company')
+    .eq('run_id', runId)
+    .maybeSingle();
+  if (!data) return null;
+  return {
+    rawText: data.raw_text ?? '',
+    scores: (data.scores as TrainerReportRow['scores']) ?? null,
+    patterns: (data.patterns as TrainerReportRow['patterns']) ?? null,
+    oneThingCompany: data.one_thing_company ?? '',
+  };
 }
 
 /**

@@ -4,7 +4,7 @@ import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-serve
 
 export const dynamic = 'force-dynamic';
 
-export default async function HierarchyPage() {
+export default async function HivePage() {
   // Live per-agent scores: average of the `overall` across this user's most
   // recent completed runs, keyed by lowercased agent title so the stage can
   // match them to nodes. No data → nodes render their name instead of a score.
@@ -62,7 +62,7 @@ export default async function HierarchyPage() {
           <div className="flex items-end justify-between gap-5 flex-wrap mb-1">
             <div>
               <div style={{ fontSize: '0.55rem', letterSpacing: '0.2em', color: 'var(--amber)', textTransform: 'uppercase', marginBottom: 8 }}>
-                /hierarchy
+                /hive
               </div>
               <h1 style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.01em', margin: 0 }}>
                 The chain of authority.

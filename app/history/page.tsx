@@ -1,12 +1,12 @@
 import Nav from '@/components/Nav';
+import AgentBadge from '@/components/AgentBadge';
+import TrainerReportButton from '@/components/history/TrainerReportButton';
+import { resolveAgentColor } from '@/lib/agent-display';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { getRecentRuns, RunSummary } from '@/lib/db/history';
 
 export const dynamic = 'force-dynamic';
 
-const ROLE_COLOR: Record<string, string> = {
-  pm: '#3b82f6', cto: '#8b5cf6', engineer: '#10b981', qa: '#ef4444', ceo: '#f59e0b', trainer: '#ec4899',
-};
 const SCORE_COLOR = (s: number) => (s >= 7.5 ? '#10b981' : s >= 6 ? '#f59e0b' : '#ef4444');
 
 export default async function HistoryPage() {
@@ -66,29 +66,31 @@ export default async function HistoryPage() {
                         {r.kind === 'dynamic' && r.answer && <><span>·</span><span style={{ color: '#10b981' }}>✓ answer</span></>}
                       </div>
                     </div>
-                    {/* Agents that participated */}
-                    <div className="flex gap-1 flex-shrink-0">
-                      {r.agentRoles.map((role) => (
-                        <div
-                          key={role}
-                          title={`${role}${r.scores?.[role] ? ` · ${r.scores[role].toFixed(1)}` : ''}`}
-                          style={{
-                            width: 22, height: 22, borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: 'var(--bg-base)', border: `1px solid ${ROLE_COLOR[role] ?? 'var(--border)'}`,
-                            fontSize: '0.5rem', fontWeight: 700, color: ROLE_COLOR[role] ?? 'var(--text-muted)',
-                          }}
-                        >
-                          {role.slice(0, 2).toUpperCase()}
-                        </div>
-                      ))}
+                    <div className="flex items-start gap-2 flex-shrink-0">
+                      {/* Trainer report widget — clickable when a report exists, dim placeholder otherwise. */}
+                      <TrainerReportButton
+                        runId={r.id}
+                        hasReport={r.hasTrainerReport}
+                        problem={r.problem}
+                      />
+                      <div className="flex gap-1 flex-shrink-0">
+                        {r.agentRoles.map((role) => (
+                          <AgentBadge
+                            key={role}
+                            agent={role}
+                            score={r.scores?.[role]}
+                          />
+                        ))}
+                      </div>
                     </div>
                   </div>
                   {/* Score strip */}
                   {r.scores && Object.keys(r.scores).length > 0 && (
                     <div className="flex gap-3 mt-3 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
                       {Object.entries(r.scores).map(([role, score]) => (
-                        <div key={role} style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>
-                          {role.toUpperCase()} <b style={{ color: SCORE_COLOR(score) }}>{score.toFixed(1)}</b>
+                        <div key={role} className="flex items-center gap-1.5" style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: resolveAgentColor(role), flexShrink: 0 }} />
+                          {role} <b style={{ color: SCORE_COLOR(score) }}>{score.toFixed(1)}</b>
                         </div>
                       ))}
                     </div>

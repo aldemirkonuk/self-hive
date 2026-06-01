@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SELFHIVE — /company parallax sketch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0806;
+    --surface: #110d0a;
+    --surface-2: #14100b;
+    --border: #2c2519;
+    --border-2: #3d3324;
+    --amber: #f59e0b;
+    --gold: #fbbf24;
+    --text: #fbf5dd;
+    --muted: rgba(251, 245, 221, 0.58);
+    --dim: rgba(251, 245, 221, 0.3);
+    --trainer: #ec4899;
+    --score-green: #10b981;
+    --score-amber: #f59e0b;
+    --score-red: #ef4444;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.45;
+    min-height: 220vh;
+  }
+
+  /* Parallax layers (from Downloads/styles.css + scroll offset via JS) */
+  .bg-grid, .bg-hex, .bg-glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    will-change: transform;
+  }
+  .bg-grid {
+    z-index: 0;
+    background-image:
+      linear-gradient(to right, rgba(245, 158, 11, 0.028) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(245, 158, 11, 0.028) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .bg-hex {
+    z-index: 0;
+    opacity: 0.07;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='104' viewBox='0 0 120 104'><g fill='none' stroke='%23f59e0b' stroke-width='1'><polygon points='30,2 58,18 58,52 30,68 2,52 2,18'/><polygon points='90,2 118,18 118,52 90,68 62,52 62,18'/><polygon points='60,52 88,68 88,102 60,118 32,102 32,68'/></g></svg>");
+    background-size: 240px 208px;
+  }
+  .bg-glow {
+    z-index: 0;
+    background: radial-gradient(ellipse 70% 45% at 50% 12%, rgba(245, 158, 11, 0.09), transparent 70%);
+    opacity: 0.9;
+  }
+
+  .page {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 24px 120px;
+  }
+
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+    background: rgba(17, 13, 10, 0.85);
+    backdrop-filter: blur(8px);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .nav .logo { color: var(--amber); font-weight: 700; letter-spacing: 0.28em; font-size: 12px; }
+  .nav .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .nav .tab { font-size: 10px; letter-spacing: 0.12em; color: var(--muted); padding: 4px 8px; }
+  .nav .tab.on { color: var(--amber); border-bottom: 1px solid var(--amber); }
+
+  .page-head { margin-bottom: 16px; }
+  .page-head h1 { font-size: 14px; letter-spacing: 0.1em; color: var(--amber); margin: 0 0 4px; }
+  .page-head p { font-size: 11px; color: var(--muted); margin: 0; max-width: 62ch; }
+
+  .layer { transform: translateY(var(--parallax-y, 0)); will-change: transform; }
+
+  .input-card {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .input-row { display: flex; gap: 12px; align-items: flex-start; }
+  .input-row .grow { flex: 1; }
+  .input-row .lbl {
+    font-size: 10px; letter-spacing: 0.1em; font-weight: 700;
+    color: var(--muted); margin-bottom: 8px;
+  }
+  .input-row textarea {
+    width: 100%; min-height: 72px; resize: none;
+    background: var(--bg); border: 1px solid var(--border-2);
+    border-radius: 6px; padding: 10px 12px; color: var(--text);
+    font-family: inherit; font-size: 12px; line-height: 1.55;
+  }
+  .btn-run {
+    background: var(--amber); color: #06060f; border: none;
+    border-radius: 6px; padding: 10px 18px; font-family: inherit;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    cursor: pointer; flex-shrink: 0;
+  }
+
+  .phase { font-size: 11px; color: var(--amber); letter-spacing: 0.06em; margin-bottom: 12px; }
+
+  .answer {
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    background: var(--surface-2);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 0 32px -8px rgba(245, 158, 11, 0.25);
+  }
+  .answer .tag { font-size: 10px; font-weight: 700; color: var(--amber); letter-spacing: 0.16em; margin-bottom: 10px; }
+
+  .agents {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .agent {
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    border-radius: 8px;
+    overflow: hidden;
+    min-height: 140px;
+  }
+  .agent .hd {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+    background: #18130d; font-size: 10px; font-weight: 700;
+  }
+  .agent .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .agent .bd { padding: 10px 12px; font-size: 10px; color: var(--muted); line-height: 1.5; }
+
+  /* Post-run: trainer + treasury (from 02-trainer-panel.html) */
+  .post-run {
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    gap: 14px;
+    align-items: start;
+  }
+  .trainer-panel {
+    border: 1px solid var(--trainer);
+    box-shadow: 0 0 0 1px var(--trainer) inset, 0 0 30px -10px var(--trainer);
+    background: var(--surface-2);
+    padding: 16px;
+    border-radius: 8px;
+  }
+  .tp-head {
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px dashed var(--border-2); padding-bottom: 12px; margin-bottom: 14px;
+  }
+  .tp-head h2 { font-size: 12px; letter-spacing: 0.2em; margin: 0; color: var(--trainer); }
+  .scores { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 14px; }
+  .score-card {
+    border: 1px solid var(--border); background: var(--bg);
+    padding: 8px; font-size: 9px;
+  }
+  .dial { width: 52px; height: 52px; margin: 6px auto; border-radius: 50%;
+    border: 4px solid var(--border); position: relative; display: grid; place-items: center;
+    font-weight: 600; font-size: 14px;
+  }
+  .dial.g { border-color: var(--score-green); color: var(--score-green); }
+  .dial.a { border-color: var(--score-amber); color: var(--score-amber); }
+
+  .treasury {
+    border: 1px solid var(--border); background: var(--surface-2);
+    padding: 12px; border-radius: 8px;
+  }
+  .treasury .big { font-size: 26px; font-weight: 600; color: var(--amber); text-align: center; }
+  .ledger-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px;
+    padding: 6px; border: 1px solid var(--border); margin-top: 6px; font-size: 9px;
+  }
+  .ledger-row.g { border-left: 2px solid var(--score-green); }
+
+  .empty {
+    text-align: center; padding: 64px 16px; color: var(--dim);
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+  }
+  .empty .dots { display: flex; gap: 6px; }
+  .empty .dots i { width: 8px; height: 8px; border-radius: 1px; opacity: 0.25; }
+
+  .sketch-tag {
+    position: fixed; bottom: 16px; right: 16px; z-index: 20;
+    font-size: 9px; letter-spacing: 0.14em; color: var(--amber);
+    border: 1px solid var(--border-2); background: rgba(17,13,10,0.9);
+    padding: 6px 10px; border-radius: 4px;
+  }
+  .scroll-hint {
+    position: fixed; bottom: 16px; left: 16px; z-index: 20;
+    font-size: 9px; color: var(--muted); letter-spacing: 0.1em;
+  }
+</style>
+</head>
+<body>
+
+<div class="bg-glow" data-parallax="0.08"></div>
+<div class="bg-grid" data-parallax="0.18"></div>
+<div class="bg-hex" data-parallax="0.32"></div>
+
+<main class="page">
+  <header class="nav">
+    <span class="logo">SELFHIVE</span>
+    <div class="tabs">
+      <span class="tab on">COMPANY</span>
+      <span class="tab">HIVE</span>
+      <span class="tab">HISTORY</span>
+      <span class="tab">RESOURCES</span>
+    </div>
+  </header>
+
+  <div class="page-head layer" data-depth="0.04">
+    <h1>THE COMPANY</h1>
+    <p>Bring any problem. Chief of Staff composes a team — runs in the background.</p>
+  </div>
+
+  <section class="input-card layer" data-depth="0.06">
+    <div class="input-row">
+      <div class="grow">
+        <div class="lbl">SUBMIT A PROBLEM TO THE HIVE</div>
+        <textarea placeholder="What stocks should I buy this week? Design a brand for X…"></textarea>
+      </div>
+      <button type="button" class="btn-run">DEPLOY TEAM</button>
+    </div>
+  </section>
+
+  <div class="empty layer" data-depth="0.1" id="idle-state">
+    <div class="dots">
+      <i style="background:#3b82f6"></i>
+      <i style="background:#8b5cf6"></i>
+      <i style="background:#10b981"></i>
+      <i style="background:#ef4444"></i>
+      <i style="background:#f59e0b"></i>
+      <i style="background:#ec4899"></i>
+    </div>
+    <span style="font-size:11px;letter-spacing:0.1em">Submit a problem and watch the hive build it.</span>
+    <span style="font-size:10px;opacity:0.6;letter-spacing:0.06em">PM → CTO → ENGINEER → QA → CEO → TRAINER</span>
+    <span style="font-size:9px;color:var(--amber);margin-top:8px">↓ scroll to preview post-run layout (trainer + treasury)</span>
+  </div>
+
+  <div class="phase layer" data-depth="0.12" style="margin-top:48vh">◌ Synthesizer converging…</div>
+
+  <section class="answer layer" data-depth="0.14">
+    <div class="tag">⬡ THE ANSWER</div>
+    <p style="font-size:12px;line-height:1.6;color:var(--text);opacity:0.9">
+      Position: overweight quality tech on a 6–12 month horizon. Risk Analyst flagged concentration;
+      Quant supports momentum. <em style="color:var(--muted)">Not investment advice.</em>
+    </p>
+  </section>
+
+  <section class="agents layer" data-depth="0.18">
+    <div class="agent"><div class="hd"><span class="dot" style="background:#8b5cf6"></span> Risk Analyst</div><div class="bd">Downside scenarios + trigger conditions…</div></div>
+    <div class="agent"><div class="hd"><span class="dot" style="background:#06b6d4"></span> Quant Analyst</div><div class="bd">Valuation multiples, momentum signals…</div></div>
+    <div class="agent"><div class="hd"><span class="dot" style="background:#22c55e"></span> Financial Advisor</div><div class="bd">Synthesized position + conviction…</div></div>
+  </section>
+
+  <section class="post-run layer" data-depth="0.22">
+    <div class="trainer-panel">
+      <div class="tp-head">
+        <h2>TRAINER</h2>
+        <span style="font-size:9px;color:var(--trainer);border:1px solid var(--trainer);padding:2px 8px;border-radius:4px">SCORING COMPLETE</span>
+      </div>
+      <div style="font-size:9px;letter-spacing:0.2em;color:var(--muted);margin-bottom:8px">SCORES · OPTION C RADIAL (from sheet 02)</div>
+      <div class="scores">
+        <div class="score-card"><div>PM</div><div class="dial g">8.2</div></div>
+        <div class="score-card"><div>CTO</div><div class="dial a">7.1</div></div>
+        <div class="score-card"><div>ENG</div><div class="dial a">6.8</div></div>
+        <div class="score-card"><div>QA</div><div class="dial g">9.0</div></div>
+        <div class="score-card"><div>CEO</div><div class="dial a">7.6</div></div>
+      </div>
+      <div style="font-size:9px;color:var(--muted);line-height:1.5;border:1px dashed var(--border-2);padding:8px">
+        <b style="color:var(--trainer);letter-spacing:0.12em">PATTERNS</b> — auto-apply prompt diff + 60s undo (not wired on /company yet)
+      </div>
+    </div>
+    <aside class="treasury">
+      <div style="font-size:8px;letter-spacing:0.22em;color:var(--muted);text-align:center">SELFHIVE TREASURY</div>
+      <div class="big">$12,847</div>
+      <div style="font-size:9px;text-align:center;color:var(--score-green)">+$420 this run</div>
+      <div class="ledger-row g"><span>QA</span><span style="color:var(--score-green)">+$180</span></div>
+      <div class="ledger-row g"><span>PM</span><span style="color:var(--score-green)">+$120</span></div>
+      <div style="font-size:8px;color:var(--amber);margin-top:10px;line-height:1.5;border:1px dashed var(--amber);padding:6px">▲ NEXT MILESTONE — ENG → GOLD in ~3 runs</div>
+    </aside>
+  </section>
+</main>
+
+<div class="scroll-hint">Parallax: grid + hex drift on scroll</div>
+<div class="sketch-tag">SKETCH 03 · /company · not production</div>
+
+<script>
+  const layers = document.querySelectorAll('[data-parallax]');
+  const depthEls = document.querySelectorAll('[data-depth]');
+
+  function onScroll() {
+    const y = window.scrollY;
+    layers.forEach((el) => {
+      const rate = parseFloat(el.dataset.parallax || '0.2');
+      el.style.transform = `translate3d(0, ${y * rate}px, 0)`;
+    });
+    depthEls.forEach((el) => {
+      const rate = parseFloat(el.dataset.depth || '0.1');
+      el.style.setProperty('--parallax-y', `${y * rate * -0.15}px`);
+    });
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+</script>
+</body>
+</html>

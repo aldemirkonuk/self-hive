@@ -1,5 +1,5 @@
 // The chain-of-authority model, derived from the real FOUNDATIONAL_ROSTER and
-// the curated specialist LIBRARY. This is the structural data the /hierarchy
+// the curated specialist LIBRARY. This is the structural data the /hive
 // radial diagram renders. Positions are polar coordinates on a 1120×760 canvas
 // (CX=560, CY=360); the FOUNDER sits at the center, leadership on the inner
 // ring, execution + summoned company on the outer ring, and the two

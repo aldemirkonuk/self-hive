@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SELFHIVE — /team · Hive Roster (creative sketch)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0806;
+    --surface: #110d0a;
+    --panel: #14100b;
+    --elevated: #18130d;
+    --border: #2c2519;
+    --border-2: #3d3324;
+    --amber: #f59e0b;
+    --gold: #fbbf24;
+    --text: #fbf5dd;
+    --muted: rgba(251, 245, 221, 0.58);
+    --dim: rgba(251, 245, 221, 0.28);
+    --trainer: #ec4899;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; min-height: 100vh; overflow-x: hidden;
+    background: var(--bg); color: var(--text);
+    font-family: var(--mono); font-size: 12px;
+  }
+
+  /* Ambient layers */
+  .bg-hex, .bg-glow, .bg-particles {
+    position: fixed; inset: 0; pointer-events: none; will-change: transform;
+  }
+  .bg-hex {
+    z-index: 0; opacity: 0.06;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='104'><g fill='none' stroke='%23f59e0b' stroke-width='1'><polygon points='30,2 58,18 58,52 30,68 2,52 2,18'/><polygon points='90,2 118,18 118,52 90,68 62,52 62,18'/></g></svg>");
+    background-size: 200px 174px;
+  }
+  .bg-glow {
+    z-index: 0;
+    background:
+      radial-gradient(ellipse 50% 40% at 20% 20%, rgba(236,72,153,0.12), transparent 55%),
+      radial-gradient(ellipse 45% 35% at 80% 60%, rgba(245,158,11,0.1), transparent 50%),
+      radial-gradient(ellipse 60% 50% at 50% 100%, rgba(6,182,212,0.06), transparent 45%);
+  }
+  .bg-particles span {
+    position: absolute; width: 3px; height: 3px; border-radius: 50%;
+    background: var(--amber); opacity: 0.35;
+    animation: drift 12s ease-in-out infinite;
+  }
+  @keyframes drift {
+    0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.2; }
+    50% { transform: translate(18px, -24px) scale(1.4); opacity: 0.55; }
+  }
+
+  .page { position: relative; z-index: 1; max-width: 1280px; margin: 0 auto; padding: 0 20px 100px; }
+
+  /* Nav stub */
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(10, 8, 6, 0.88); backdrop-filter: blur(10px);
+  }
+  .nav .logo { color: var(--amber); font-weight: 700; letter-spacing: 0.28em; font-size: 11px; }
+  .nav .tab.on { color: var(--amber); font-size: 10px; letter-spacing: 0.1em; }
+
+  /* Hero */
+  .hero {
+    padding: 36px 0 28px;
+    display: grid; grid-template-columns: 1fr 280px; gap: 24px; align-items: end;
+  }
+  @media (max-width: 900px) { .hero { grid-template-columns: 1fr; } }
+  .hero h1 {
+    font-size: clamp(1.4rem, 4vw, 2rem); font-weight: 700; letter-spacing: 0.06em;
+    margin: 0 0 8px; line-height: 1.1;
+    background: linear-gradient(135deg, var(--text) 0%, var(--amber) 55%, var(--trainer) 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .hero .lead { font-size: 11px; color: var(--muted); max-width: 48ch; line-height: 1.6; margin: 0; }
+  .hero-stats {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 10px; padding: 14px;
+    box-shadow: 0 0 40px -12px rgba(245, 158, 11, 0.2);
+  }
+  .hero-stats .row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 10px; letter-spacing: 0.08em;
+  }
+  .hero-stats .n { font-size: 22px; font-weight: 600; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .hero-stats .n.pink { color: var(--trainer); font-size: 16px; }
+
+  /* Filter pills */
+  .filters {
+    display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px;
+  }
+  .filter {
+    font-size: 10px; letter-spacing: 0.12em; padding: 6px 14px;
+    border-radius: 999px; border: 1px solid var(--border);
+    background: transparent; color: var(--muted); cursor: pointer;
+    font-family: inherit; transition: all 0.25s;
+  }
+  .filter:hover, .filter.on {
+    color: var(--amber); border-color: rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.08);
+    box-shadow: 0 0 20px -6px rgba(245, 158, 11, 0.35);
+  }
+
+  /* ─── CONSTELLATION (creative centerpiece) ─── */
+  .constellation-wrap {
+    position: relative;
+    height: 420px;
+    margin-bottom: 32px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: radial-gradient(ellipse 80% 70% at 50% 45%, rgba(24, 19, 13, 0.95), var(--bg));
+    overflow: hidden;
+  }
+  .constellation-wrap::before {
+    content: 'LIVE ROSTER MAP · hover nodes';
+    position: absolute; top: 12px; left: 14px; z-index: 5;
+    font-size: 9px; letter-spacing: 0.2em; color: var(--dim);
+  }
+  .orbit-ring {
+    position: absolute; left: 50%; top: 50%;
+    border: 1px dashed var(--border-2);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    animation: spin-slow 120s linear infinite;
+  }
+  .orbit-ring.r1 { width: 120px; height: 120px; }
+  .orbit-ring.r2 { width: 220px; height: 220px; animation-duration: 90s; animation-direction: reverse; }
+  .orbit-ring.r3 { width: 340px; height: 340px; animation-duration: 150s; }
+  .orbit-ring.r4 { width: 460px; height: 460px; opacity: 0.4; animation-duration: 200s; }
+  @keyframes spin-slow { to { transform: translate(-50%, -50%) rotate(360deg); } }
+
+  .core-founder {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 72px; height: 72px; z-index: 10;
+    display: grid; place-items: center;
+    background: var(--amber);
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    font-size: 11px; font-weight: 700; color: #0a0806;
+    box-shadow: 0 0 0 8px rgba(245, 158, 11, 0.12), 0 0 48px rgba(245, 158, 11, 0.35);
+    animation: core-pulse 3s ease-in-out infinite;
+  }
+  @keyframes core-pulse {
+    0%, 100% { box-shadow: 0 0 0 6px rgba(245,158,11,0.1), 0 0 32px rgba(245,158,11,0.25); }
+    50% { box-shadow: 0 0 0 14px rgba(245,158,11,0.18), 0 0 56px rgba(245,158,11,0.45); }
+  }
+
+  .node {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    z-index: 8;
+    cursor: pointer;
+    transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), z-index 0s;
+  }
+  .node:hover { transform: translate(-50%, -50%) scale(1.18); z-index: 20; }
+  .node-hex {
+    width: 48px; height: 48px;
+    background: var(--c, var(--amber));
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    display: grid; place-items: center;
+    font-size: 9px; font-weight: 700; color: #0a0806;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--c) 30%, transparent);
+    transition: box-shadow 0.3s;
+  }
+  .node:hover .node-hex {
+    box-shadow: 0 0 0 4px var(--c), 0 0 28px color-mix(in srgb, var(--c) 55%, transparent);
+  }
+  .node.governance .node-hex { width: 56px; height: 56px; }
+  .node-label {
+    position: absolute; left: 50%; top: 100%; margin-top: 6px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-size: 8px; letter-spacing: 0.1em;
+    color: var(--muted);
+    opacity: 0; transition: opacity 0.2s;
+    pointer-events: none;
+  }
+  .node:hover .node-label { opacity: 1; color: var(--text); }
+  .node-tier {
+    position: absolute; right: -4px; top: -4px;
+    font-size: 7px; font-weight: 700; letter-spacing: 0.06em;
+    padding: 2px 4px; border-radius: 3px;
+    background: var(--bg); border: 1px solid var(--gold);
+    color: var(--gold);
+  }
+
+  svg.links {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 2;
+  }
+  svg.links line {
+    stroke: var(--border-2); stroke-width: 1;
+    stroke-dasharray: 4 6;
+    animation: dash-flow 20s linear infinite;
+  }
+  svg.links line.hot { stroke: rgba(245, 158, 11, 0.35); stroke-width: 1.5; }
+  @keyframes dash-flow { to { stroke-dashoffset: -200; } }
+
+  /* Promotion river */
+  .promo-river {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 56px;
+    background: linear-gradient(to top, rgba(168, 85, 247, 0.08), transparent);
+    border-top: 1px dashed rgba(168, 85, 247, 0.25);
+    display: flex; align-items: center; gap: 12px; padding: 0 16px;
+    overflow: hidden;
+  }
+  .promo-river .lbl { font-size: 8px; letter-spacing: 0.18em; color: #a855f7; flex-shrink: 0; }
+  .promo-track {
+    flex: 1; display: flex; gap: 24px;
+    animation: marquee 28s linear infinite;
+  }
+  @keyframes marquee {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  .promo-chip {
+    flex-shrink: 0; font-size: 9px; letter-spacing: 0.08em;
+    padding: 4px 10px; border-radius: 999px;
+    border: 1px solid rgba(168, 85, 247, 0.35);
+    background: rgba(168, 85, 247, 0.06);
+    color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .promo-chip .spark { color: #a855f7; }
+
+  /* Detail panel (appears on selection) */
+  .detail-dock {
+    margin-bottom: 28px;
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    border-radius: 12px;
+    background: var(--panel);
+    padding: 18px 20px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 20px;
+    align-items: center;
+    animation: dock-in 0.5s ease;
+  }
+  @keyframes dock-in {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .detail-dock .big-hex {
+    width: 64px; height: 64px; background: var(--sel, var(--amber));
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #0a0806;
+  }
+  .detail-dock h2 { margin: 0 0 4px; font-size: 14px; letter-spacing: 0.08em; color: var(--sel, var(--amber)); }
+  .detail-dock .mandate { font-size: 10px; color: var(--muted); line-height: 1.55; margin: 0; max-width: 52ch; }
+  .tier-meter {
+    text-align: right; min-width: 140px;
+  }
+  .tier-meter .tier-name { font-size: 18px; font-weight: 700; color: var(--gold); letter-spacing: 0.12em; }
+  .tier-meter .bar {
+    height: 6px; background: var(--border); margin-top: 8px; border-radius: 3px; overflow: hidden;
+  }
+  .tier-meter .bar i {
+    display: block; height: 100%; width: 72%;
+    background: linear-gradient(90deg, var(--gold), var(--amber));
+    animation: bar-grow 2s ease infinite alternate;
+  }
+  @keyframes bar-grow { from { width: 68%; } to { width: 78%; } }
+  .tier-meter .cr { font-size: 9px; color: var(--dim); margin-top: 6px; }
+
+  /* Tier sections — cards with tilt on hover */
+  .tier-section { margin-bottom: 36px; }
+  .tier-head {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 14px;
+  }
+  .tier-head .tag {
+    font-size: 9px; letter-spacing: 0.22em; font-weight: 700;
+    padding: 4px 12px; border-radius: 4px;
+  }
+  .tier-head .tag.gov { color: #94a3b8; border: 1px solid rgba(148,163,184,0.35); background: rgba(148,163,184,0.06); }
+  .tier-head .tag.lead { color: var(--amber); border: 1px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.06); }
+  .tier-head .tag.exec { color: #06b6d4; border: 1px solid rgba(6,182,212,0.35); background: rgba(6,182,212,0.06); }
+  .tier-head .line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border-2), transparent); }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .agent-card {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    padding: 16px;
+    overflow: hidden;
+    transition: transform 0.4s cubic-bezier(0.23, 1, 0.32, 1), border-color 0.3s, box-shadow 0.3s;
+    transform-style: preserve-3d;
+  }
+  .agent-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--c, var(--amber));
+    transform: scaleX(0); transform-origin: left;
+    transition: transform 0.4s ease;
+  }
+  .agent-card:hover {
+    transform: translateY(-6px) rotateX(2deg);
+    border-color: color-mix(in srgb, var(--c) 45%, var(--border));
+    box-shadow: 0 16px 40px -12px color-mix(in srgb, var(--c) 25%, transparent);
+  }
+  .agent-card:hover::before { transform: scaleX(1); }
+  .agent-card .top {
+    display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 10px;
+  }
+  .agent-card .who { display: flex; align-items: center; gap: 10px; }
+  .agent-card .mini-hex {
+    width: 36px; height: 36px; background: var(--c);
+    clip-path: polygon(50% 0, 100% 25%, 100% 75%, 50% 100%, 0 75%, 0 25%);
+    display: grid; place-items: center; font-size: 8px; font-weight: 700; color: #0a0806;
+  }
+  .agent-card h3 { margin: 0; font-size: 12px; color: var(--c); letter-spacing: 0.04em; }
+  .agent-card .badge-tier {
+    font-size: 8px; letter-spacing: 0.1em; padding: 2px 6px;
+    border: 1px solid var(--gold); color: var(--gold); border-radius: 3px;
+  }
+  .agent-card p { margin: 0; font-size: 10px; color: var(--muted); line-height: 1.55; }
+  .agent-card .foot {
+    margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border);
+    display: flex; justify-content: space-between; font-size: 9px; color: var(--dim);
+  }
+  .agent-card .foot b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* Custom agents — floating shelf */
+  .custom-zone {
+    border: 1px dashed rgba(168, 85, 247, 0.4);
+    border-radius: 14px;
+    padding: 20px;
+    background: linear-gradient(135deg, rgba(168,85,247,0.04) 0%, transparent 60%);
+    position: relative;
+  }
+  .custom-zone h3 {
+    font-size: 10px; letter-spacing: 0.2em; color: #a855f7; margin: 0 0 16px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .custom-zone h3::before {
+    content: '+'; width: 18px; height: 18px; border-radius: 4px;
+    border: 1px solid #a855f7; display: grid; place-items: center; font-size: 12px;
+  }
+  .custom-orbit {
+    display: flex; flex-wrap: wrap; gap: 16px; justify-content: center;
+    min-height: 140px; align-items: center;
+  }
+  .custom-orb {
+    width: 100px; height: 100px;
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--c) 50%, transparent);
+    background: radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--c) 20%, var(--panel)), var(--panel));
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 12px;
+    animation: float 4s ease-in-out infinite;
+    cursor: pointer;
+    transition: transform 0.3s, box-shadow 0.3s;
+  }
+  .custom-orb:nth-child(2) { animation-delay: -1.2s; }
+  .custom-orb:nth-child(3) { animation-delay: -2.4s; }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  .custom-orb:hover {
+    transform: scale(1.08) translateY(-4px);
+    box-shadow: 0 0 32px -6px var(--c);
+  }
+  .custom-orb .t { font-size: 9px; font-weight: 700; color: var(--c); letter-spacing: 0.06em; }
+  .custom-orb .d { font-size: 7px; color: var(--dim); margin-top: 4px; }
+
+  .add-orb {
+    width: 72px; height: 72px; border-radius: 50%;
+    border: 1px dashed rgba(168, 85, 247, 0.5);
+    display: grid; place-items: center;
+    font-size: 24px; color: #a855f7; opacity: 0.6;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .add-orb:hover { opacity: 1; transform: scale(1.05); }
+
+  /* Alumni / promoted — ascending stairs */
+  .alumni {
+    display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .alumni-step {
+    flex: 1; min-width: 140px;
+    border: 1px solid var(--border);
+    border-radius: 8px 8px 0 0;
+    padding: 12px;
+    background: var(--elevated);
+    position: relative;
+    animation: step-rise 0.6s ease backwards;
+  }
+  .alumni-step:nth-child(1) { animation-delay: 0.1s; min-height: 80px; }
+  .alumni-step:nth-child(2) { animation-delay: 0.2s; min-height: 100px; border-color: rgba(16,185,129,0.3); }
+  .alumni-step:nth-child(3) { animation-delay: 0.3s; min-height: 120px; border-color: rgba(251,191,36,0.35); }
+  @keyframes step-rise {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .alumni-step .name { font-size: 11px; font-weight: 700; }
+  .alumni-step .meta { font-size: 8px; color: var(--gold); margin-top: 6px; letter-spacing: 0.08em; }
+  .alumni-step .arrow {
+    position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+    font-size: 8px; color: #10b981; letter-spacing: 0.1em;
+  }
+
+  .sketch-tag {
+    position: fixed; bottom: 14px; right: 14px; z-index: 100;
+    font-size: 9px; letter-spacing: 0.12em; color: var(--amber);
+    border: 1px solid var(--border-2); background: rgba(10,8,6,0.92); padding: 6px 10px;
+  }
+</style>
+</head>
+<body>
+
+<div class="bg-glow"></div>
+<div class="bg-hex" id="bgHex"></div>
+<div class="bg-particles" id="particles"></div>
+
+<main class="page">
+  <header class="nav">
+    <span class="logo">SELFHIVE</span>
+    <span class="tab on">TEAM</span>
+  </header>
+
+  <section class="hero">
+    <div>
+      <h1>THE HIVE ROSTER</h1>
+      <p class="lead">
+        Permanent agents, your custom specialists, and graduates from the field.
+        Every run feeds the treasury — tiers unlock privilege. This is the company you built.
+      </p>
+    </div>
+    <div class="hero-stats">
+      <div class="row"><span>FOUNDATIONAL</span><span class="n">8</span></div>
+      <div class="row"><span>CUSTOM</span><span class="n pink">3</span></div>
+      <div class="row"><span>PROMOTED</span><span class="n" style="font-size:14px;color:#10b981">2</span></div>
+      <div class="row"><span>POOL</span><span class="n" style="font-size:14px">47.2k cr</span></div>
+    </div>
+  </section>
+
+  <div class="filters">
+    <button type="button" class="filter on">ALL</button>
+    <button type="button" class="filter">ROSTER</button>
+    <button type="button" class="filter">CUSTOM</button>
+    <button type="button" class="filter">PROMOTED</button>
+    <button type="button" class="filter">TREASURY</button>
+  </div>
+
+  <!-- Constellation map -->
+  <section class="constellation-wrap" id="map">
+    <div class="orbit-ring r1"></div>
+    <div class="orbit-ring r2"></div>
+    <div class="orbit-ring r3"></div>
+    <div class="orbit-ring r4"></div>
+
+    <svg class="links" viewBox="0 0 800 420" preserveAspectRatio="none">
+      <line class="hot" x1="400" y1="210" x2="400" y2="95" />
+      <line x1="400" y1="210" x2="520" y2="160" />
+      <line x1="400" y1="210" x2="280" y2="160" />
+      <line x1="400" y1="210" x2="560" y2="250" />
+      <line x1="400" y1="210" x2="240" y2="250" />
+      <line x1="400" y1="210" x2="400" y2="310" />
+      <line x1="400" y1="210" x2="640" y2="210" />
+      <line x1="400" y1="95" x2="640" y2="210" />
+    </svg>
+
+    <div class="core-founder">YOU</div>
+
+    <!-- positioned % for responsive constellation -->
+    <div class="node governance" style="left:50%;top:23%;--c:#94a3b8" data-agent="ethics">
+      <div class="node-hex">ETH</div><span class="node-tier">GLD</span><span class="node-label">Ethics Guardian</span>
+    </div>
+    <div class="node" style="left:35%;top:38%;--c:#f59e0b" data-agent="ceo">
+      <div class="node-hex">CEO</div><span class="node-tier">SLV</span><span class="node-label">CEO</span>
+    </div>
+    <div class="node" style="left:65%;top:38%;--c:#10b981" data-agent="cfo">
+      <div class="node-hex">CFO</div><span class="node-tier">SLV</span><span class="node-label">CFO</span>
+    </div>
+    <div class="node" style="left:50%;top:50%;--c:#f59e0b" data-agent="cos">
+      <div class="node-hex">COS</div><span class="node-tier">GLD</span><span class="node-label">Chief of Staff</span>
+    </div>
+    <div class="node" style="left:72%;top:52%;--c:#ec4899" data-agent="trainer">
+      <div class="node-hex">TRN</div><span class="node-tier">GLD</span><span class="node-label">Trainer · parallel orbit</span>
+    </div>
+    <div class="node" style="left:28%;top:55%;--c:#a855f7" data-agent="spawner">
+      <div class="node-hex">SPW</div><span class="node-tier">BRZ</span><span class="node-label">Spawner</span>
+    </div>
+    <div class="node" style="left:38%;top:68%;--c:#ef4444" data-agent="critic">
+      <div class="node-hex">CRT</div><span class="node-tier">SLV</span><span class="node-label">Critic</span>
+    </div>
+    <div class="node" style="left:58%;top:68%;--c:#06b6d4" data-agent="syn">
+      <div class="node-hex">SYN</div><span class="node-tier">SLV</span><span class="node-label">Synthesizer</span>
+    </div>
+    <!-- summoned ghosts on outer ring -->
+    <div class="node" style="left:82%;top:35%;--c:#8b5cf6;opacity:0.55" data-agent="mkt">
+      <div class="node-hex" style="width:36px;height:36px;font-size:7px">MKT</div><span class="node-label">summoned · library</span>
+    </div>
+    <div class="node" style="left:18%;top:42%;--c:#ef4444;opacity:0.55" data-agent="risk">
+      <div class="node-hex" style="width:36px;height:36px;font-size:7px">RSK</div><span class="node-label">summoned · library</span>
+    </div>
+
+    <div class="promo-river">
+      <span class="lbl">PROMOTION TRACK</span>
+      <div class="promo-track">
+        <span class="promo-chip"><span class="spark">⚡</span> spawned · Macro Analyst · run #481</span>
+        <span class="promo-chip"><span class="spark">↗</span> score 8.4 · 5/5 appearances</span>
+        <span class="promo-chip"><span class="spark">★</span> PROMOTED → treasury · Macro Analyst</span>
+        <span class="promo-chip"><span class="spark">⚡</span> spawned · Sentiment Bot · run #479</span>
+        <span class="promo-chip"><span class="spark">↗</span> score 8.4 · 5/5 appearances</span>
+        <span class="promo-chip"><span class="spark">★</span> PROMOTED → treasury · Macro Analyst</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Selected agent dock (default CEO) -->
+  <section class="detail-dock" id="dock" style="--sel:#f59e0b">
+    <div class="big-hex">CEO</div>
+    <div>
+      <h2>CEO</h2>
+      <p class="mandate">Sets and defends the mission (EXPOSURE × OUTPUT QUALITY). Generates problems. Final sign-off.</p>
+    </div>
+    <div class="tier-meter">
+      <div class="tier-name">SILVER</div>
+      <div class="bar"><i></i></div>
+      <div class="cr">2,180 lifetime · +60 last run</div>
+    </div>
+  </section>
+
+  <!-- Leadership tier cards -->
+  <section class="tier-section">
+    <div class="tier-head">
+      <span class="tag lead">LEADERSHIP</span>
+      <span class="line"></span>
+      <span style="font-size:9px;color:var(--dim)">inner ring · always on</span>
+    </div>
+    <div class="card-grid">
+      <article class="agent-card" style="--c:#f59e0b">
+        <div class="top"><div class="who"><div class="mini-hex">CEO</div><div><h3>CEO</h3></div></div><span class="badge-tier">SILVER</span></div>
+        <p>Mission, problems, final sign-off. Decisive, outcome-obsessed.</p>
+        <div class="foot"><span>last run <b>+60</b></span><span><b>2,180</b> cr lifetime</span></div>
+      </article>
+      <article class="agent-card" style="--c:#f59e0b">
+        <div class="top"><div class="who"><div class="mini-hex">COS</div><div><h3>Chief of Staff</h3></div></div><span class="badge-tier">GOLD</span></div>
+        <p>Composes teams + dependency graphs per problem.</p>
+        <div class="foot"><span>deploy rate <b>100%</b></span><span><b>3,400</b> cr</span></div>
+      </article>
+      <article class="agent-card" style="--c:#10b981">
+        <div class="top"><div class="who"><div class="mini-hex">CFO</div><div><h3>CFO</h3></div></div><span class="badge-tier">SILVER</span></div>
+        <p>Model tiers, web budget, skip logic.</p>
+        <div class="foot"><span>saved <b>34%</b> last run</span><span><b>1,940</b> cr</span></div>
+      </article>
+      <article class="agent-card" style="--c:#ec4899">
+        <div class="top"><div class="who"><div class="mini-hex">TRN</div><div><h3>Trainer</h3></div></div><span class="badge-tier">GOLD</span></div>
+        <p>Scores every agent · patterns · auto-apply prompts.</p>
+        <div class="foot"><span>avg conf <b>.84</b></span><span><b>4,120</b> cr</span></div>
+      </article>
+    </div>
+  </section>
+
+  <section class="tier-section">
+    <div class="tier-head">
+      <span class="tag exec">EXECUTION</span>
+      <span class="line"></span>
+    </div>
+    <div class="card-grid">
+      <article class="agent-card" style="--c:#a855f7">
+        <div class="top"><div class="who"><div class="mini-hex">SPW</div><div><h3>Spawner</h3></div></div><span class="badge-tier">BRONZE</span></div>
+        <p>Builds specialists when CoS finds a gap.</p>
+        <div class="foot"><span>spawned <b>12</b> total</span><span><b>890</b> cr</span></div>
+      </article>
+      <article class="agent-card" style="--c:#ef4444">
+        <div class="top"><div class="who"><div class="mini-hex">CRT</div><div><h3>Critic</h3></div></div><span class="badge-tier">SILVER</span></div>
+        <p>Red-teams before ship.</p>
+        <div class="foot"><span>blocks <b>2</b> runs</span><span><b>1,620</b> cr</span></div>
+      </article>
+      <article class="agent-card" style="--c:#06b6d4">
+        <div class="top"><div class="who"><div class="mini-hex">SYN</div><div><h3>Synthesizer</h3></div></div><span class="badge-tier">SILVER</span></div>
+        <p>Converges outputs → one answer.</p>
+        <div class="foot"><span>claims cited <b>94%</b></span><span><b>2,010</b> cr</span></div>
+      </article>
+    </div>
+  </section>
+
+  <!-- Custom agents -->
+  <section class="custom-zone">
+    <h3>YOUR CUSTOM AGENTS · Chief of Staff deploys when relevant</h3>
+    <div class="custom-orbit">
+      <div class="custom-orb" style="--c:#e879f9"><span class="t">Brand Voice</span><span class="d">marketing</span></div>
+      <div class="custom-orb" style="--c:#38bdf8"><span class="t">Legal Scout</span><span class="d">compliance</span></div>
+      <div class="custom-orb" style="--c:#fb923c"><span class="t">Ops Planner</span><span class="d">logistics</span></div>
+      <div class="add-orb" title="Create agent">+</div>
+    </div>
+  </section>
+
+  <!-- Promoted alumni -->
+  <section class="tier-section">
+    <div class="tier-head">
+      <span class="tag" style="color:#10b981;border:1px solid rgba(16,185,129,0.35);background:rgba(16,185,129,0.06);padding:4px 12px;border-radius:4px;font-size:9px;letter-spacing:0.22em">PROMOTED SPECIALISTS</span>
+      <span class="line"></span>
+      <span style="font-size:9px;color:var(--dim)">≥8.2 avg · 5 appearances</span>
+    </div>
+    <div class="alumni">
+      <div class="alumni-step"><span class="arrow">↑ graduate</span><div class="name" style="color:#8b5cf6">Macro Analyst</div><div class="meta">GOLD · 6,240 cr</div></div>
+      <div class="alumni-step"><span class="arrow">↑ graduate</span><div class="name" style="color:#06b6d4">Sentiment Bot</div><div class="meta">SILVER · 3,100 cr</div></div>
+      <div class="alumni-step" style="border-style:dashed;opacity:0.5"><div class="name" style="color:var(--dim)">Next slot open</div><div class="meta">spawn → prove → promote</div></div>
+    </div>
+  </section>
+</main>
+
+<div class="sketch-tag">SKETCH 05 · /team · creative · not production</div>
+
+<script>
+  // Parallax backgrounds
+  const hex = document.getElementById('bgHex');
+  window.addEventListener('scroll', () => {
+    const y = window.scrollY;
+    if (hex) hex.style.transform = `translate3d(0, ${y * 0.2}px, 0)`;
+  }, { passive: true });
+
+  // Floating particles
+  const box = document.getElementById('particles');
+  if (box) {
+    for (let i = 0; i < 24; i++) {
+      const s = document.createElement('span');
+      s.style.left = Math.random() * 100 + '%';
+      s.style.top = Math.random() * 100 + '%';
+      s.style.animationDelay = Math.random() * 8 + 's';
+      s.style.animationDuration = 8 + Math.random() * 10 + 's';
+      box.appendChild(s);
+    }
+  }
+
+  // Node click → update detail dock
+  const agents = {
+    ceo: { ini: 'CEO', title: 'CEO', color: '#f59e0b', mandate: 'Sets and defends the mission (EXPOSURE × OUTPUT QUALITY). Generates problems. Final sign-off.', tier: 'SILVER', cr: '2,180 lifetime · +60 last run' },
+    cos: { ini: 'COS', title: 'Chief of Staff', color: '#f59e0b', mandate: 'Reads each problem, composes the right team, builds the dependency graph.', tier: 'GOLD', cr: '3,400 lifetime · deploys every run' },
+    cfo: { ini: 'CFO', title: 'CFO', color: '#10b981', mandate: 'Governs cost + latency. Haiku vs Sonnet per agent.', tier: 'SILVER', cr: '1,940 lifetime' },
+    trainer: { ini: 'TRN', title: 'Trainer', color: '#ec4899', mandate: 'Scores every agent. Detects patterns. Auto-applies prompt fixes.', tier: 'GOLD', cr: '4,120 lifetime' },
+    ethics: { ini: 'ETH', title: 'Ethics Guardian', color: '#94a3b8', mandate: 'Red-card veto. Outside the chain.', tier: 'GOLD', cr: 'governance · no earnings' },
+    spawner: { ini: 'SPW', title: 'Spawner', color: '#a855f7', mandate: 'Builds new specialists when CoS finds a gap.', tier: 'BRONZE', cr: '890 lifetime' },
+    critic: { ini: 'CRT', title: 'Critic', color: '#ef4444', mandate: 'Red-teams the conclusion before it ships.', tier: 'SILVER', cr: '1,620 lifetime' },
+    syn: { ini: 'SYN', title: 'Synthesizer', color: '#06b6d4', mandate: 'Converges all outputs into one deliverable.', tier: 'SILVER', cr: '2,010 lifetime' },
+  };
+  const dock = document.getElementById('dock');
+  document.querySelectorAll('.node[data-agent]').forEach((node) => {
+    node.addEventListener('click', () => {
+      const a = agents[node.dataset.agent];
+      if (!a || !dock) return;
+      dock.style.setProperty('--sel', a.color);
+      dock.innerHTML = `
+        <div class="big-hex">${a.ini}</div>
+        <div><h2>${a.title}</h2><p class="mandate">${a.mandate}</p></div>
+        <div class="tier-meter"><div class="tier-name">${a.tier}</div><div class="bar"><i></i></div><div class="cr">${a.cr}</div></div>
+      `;
+      dock.style.animation = 'none';
+      void dock.offsetWidth;
+      dock.style.animation = 'dock-in 0.45s ease';
+    });
+  });
+
+  // Filter pills (visual toggle only)
+  document.querySelectorAll('.filter').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter').forEach((b) => b.classList.remove('on'));
+      btn.classList.add('on');
+    });
+  });
+
+  // Card tilt follow mouse (subtle)
+  document.querySelectorAll('.agent-card').forEach((card) => {
+    card.addEventListener('mousemove', (e) => {
+      const r = card.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width - 0.5;
+      const y = (e.clientY - r.top) / r.height - 0.5;
+      card.style.transform = `translateY(-6px) rotateX(${-y * 6}deg) rotateY(${x * 6}deg)`;
+    });
+    card.addEventListener('mouseleave', () => {
+      card.style.transform = '';
+    });
+  });
+</script>
+</body>
+</html>

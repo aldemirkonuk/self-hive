@@ -10,7 +10,7 @@ const TABS = [
   { href: '/portfolio', label: 'PORTFOLIO' },
   { href: '/decisions', label: 'DECISIONS' },
   { href: '/team', label: 'TEAM' },
-  { href: '/hierarchy', label: 'HIERARCHY' },
+  { href: '/hive', label: 'HIVE' },
   { href: '/resources', label: 'RESOURCES' },
   { href: '/history', label: 'HISTORY' },
   { href: '/dashboard', label: 'DASHBOARD' },

@@ -174,7 +174,7 @@ export async function* runDynamicTeam(
     const cos = await client.messages.create({
       model: 'claude-sonnet-4-5',
       max_tokens: 2000,
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs) + cosEffect.systemPromptAddition),
+      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory) + cosEffect.systemPromptAddition),
       messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
       ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
     });

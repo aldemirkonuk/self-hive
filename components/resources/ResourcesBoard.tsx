@@ -228,18 +228,7 @@ export default function ResourcesBoard({ initial }: { initial: ResourcesPayload 
   const ordered = useMemo(() => buildAgentOrder(agents), [agents]);
 
   return (
-    <div className="max-w-6xl mx-auto p-6">
-      {/* Page header */}
-      <div className="res-head">
-        <div className="eyebrow">/resources</div>
-        <h1>Hand each agent its own <em>library</em>.</h1>
-        <p className="sub">
-          Drag a book, a markdown doc, a tool, or a memory store onto any agent — or drop a text
-          file straight off your desktop. Whatever you attach becomes context that agent carries
-          into every run. Grants are additive preferences, never fences.
-        </p>
-      </div>
-
+    <>
       {!signedIn && (
         <div className="res-banner" style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.35)', color: '#f59e0b' }}>
           Sign in to assign resources. You&apos;re viewing the catalog read-only.
@@ -393,7 +382,7 @@ export default function ResourcesBoard({ initial }: { initial: ResourcesPayload 
       {toast && (
         <div className={`res-toast slide-in ${toast.ok ? 'ok' : 'err'}`}>{toast.text}</div>
       )}
-    </div>
+    </>
   );
 }
 

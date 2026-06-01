@@ -29,7 +29,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
   try {
     let total: Cost = { usd: 0, in: 0, out: 0 };
 
-    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle);
+    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory);
     total = sum(total, composed.cost);
     const { plan, models } = composed;
 
@@ -38,7 +38,10 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 
     let outputs: Outputs = {};
     for (let i = 0; i < layers.length; i++) {
-      const layerRes = await layerStep(input.runId, input.problem, layers[i], outputs, models, input.customAgents, input.resourceBundle);
+      const layerRes = await layerStep(
+        input.runId, input.problem, layers[i], outputs, models, input.customAgents, input.resourceBundle,
+        input.userId, plan.classification,
+      );
       outputs = { ...outputs, ...layerRes.outputs };
       total = sum(total, layerRes.cost);
     }
@@ -50,6 +53,10 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     const train = await trainerStep(input.runId, input.problem, plan, outputs, synth.answer, input.trainerHistory, input.resourceBundle);
     total = sum(total, train.cost);
 
+    // Auto-mutation loop: distill trainer advice → store as overlays → promote pins.
+    // Non-fatal if it fails — finalize still runs and the answer is delivered.
+    await distillStep(input.runId, input.userId, input.problem, plan.classification, plan.agents.map((a) => ({ id: a.id, title: a.title })), train.report);
+
     await finalizeStep(input.runId, input.userId, plan, synth.answer, train.report, total);
     return { ok: true, costUsd: total.usd };
   } catch (err) {
@@ -60,15 +67,27 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──
-async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle) {
+async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string) {
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
-  return composeImpl(runId, problem, customAgents, costByClass, bundle);
+  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory);
 }
-async function layerStep(runId: string, problem: string, layer: PlannedAgent[], prior: Outputs, models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle) {
+async function layerStep(
+  runId: string, problem: string, layer: PlannedAgent[], prior: Outputs,
+  models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
+  userId?: string | null, classification?: string,
+) {
   'use step';
   const { runLayerImpl } = await import('@/lib/jobs/step-impl');
-  return runLayerImpl(runId, problem, layer, prior, models, customAgents, bundle);
+  return runLayerImpl(runId, problem, layer, prior, models, customAgents, bundle, userId ?? null, classification ?? null);
+}
+async function distillStep(
+  runId: string, userId: string | null, problem: string,
+  classification: string, planAgents: { id: string; title: string }[], trainerReport: string,
+) {
+  'use step';
+  const { distillImpl } = await import('@/lib/jobs/step-impl');
+  return distillImpl(runId, userId, problem, classification, planAgents, trainerReport);
 }
 async function criticStep(runId: string, problem: string, outputs: Outputs, bundle?: ResourceBundle) {
   'use step';

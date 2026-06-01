@@ -1,141 +1,270 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { getBrowserSupabase, isSupabaseConfiguredClient } from '@/lib/db/supabase-browser';
+import CompanyBentoBoard, {
+  type BentoAgent,
+  type BentoTotals,
+  type PhaseId,
+} from '@/components/company/CompanyBentoBoard';
 
-interface AgentCard {
-  id: string;
-  title: string;
-  color: string;
-  model: string;
-  source: string;
-  content: string;
-  status: 'working' | 'done';
-}
+/**
+ * /company — live hive runner.
+ *
+ * Pure state machine over the Supabase Realtime event stream. All visual
+ * logic lives in CompanyBentoBoard. Agents are NEVER pre-positioned —
+ * they spawn into the bento only when their `agent_start` event arrives,
+ * with the title/color/model the Chief of Staff chose.
+ */
 
 interface RunEventRow {
   id: number;
   type: string;
   payload: Record<string, unknown>;
+  created_at?: string;
 }
 
-const PHASE_LABEL: Record<string, string> = {
-  cos_start: 'Chief of Staff composing team…',
-  team_plan: 'Team composed',
-  cfo_decision: 'CFO assigned model tiers',
-  critic_start: 'Critic red-teaming…',
-  synthesis_start: 'Synthesizer converging…',
-  trainer_start: 'Trainer scoring…',
-  run_complete: 'Complete',
-};
+interface PlanAgentLike {
+  id: string;
+  title?: string;
+  source?: string;
+  dependsOn?: string[];
+}
+
+function patchAgent(
+  prev: Record<string, BentoAgent>,
+  id: string,
+  patch: Partial<BentoAgent>
+): Record<string, BentoAgent> {
+  const cur = prev[id];
+  if (!cur) return prev;
+  return { ...prev, [id]: { ...cur, ...patch, lastTick: Date.now() } };
+}
 
 export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string }) {
+  // ── input + run identity ──
   const [problem, setProblem] = useState('');
   const [jobId, setJobId] = useState<string | null>(resumeJobId ?? null);
   const [running, setRunning] = useState(false);
-  const [phase, setPhase] = useState('');
-  const [cfoNote, setCfoNote] = useState('');
-  const [agents, setAgents] = useState<Record<string, AgentCard>>({});
-  const [agentOrder, setAgentOrder] = useState<string[]>([]);
-  const [critic, setCritic] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [trainer, setTrainer] = useState('');
-  const [error, setError] = useState('');
-  const seqSeen = useRef<Set<number>>(new Set());
-  const cleanupRef = useRef<(() => void) | null>(null);
-  const isComplete = phase === PHASE_LABEL.run_complete || (!!answer && !running);
 
+  // ── derived run state from event stream ──
+  const [phase, setPhase] = useState<PhaseId>('IDLE');
+  const [agents, setAgents] = useState<Record<string, BentoAgent>>({});
+  const [agentOrder, setAgentOrder] = useState<string[]>([]);
+  const [cfoNote, setCfoNote] = useState('');
+  const [criticBody, setCriticBody] = useState('');
+  const [synBody, setSynBody] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [trainerDone, setTrainerDone] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [completedAt, setCompletedAt] = useState<number | null>(null);
+  const [totals, setTotals] = useState<BentoTotals | null>(null);
+
+  // ── perf bookkeeping ──
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const seqSeen = useRef<Set<number>>(new Set());
+  const doneCounter = useRef(0);
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  // ── elapsed ticker: live while running, freezes at completion ──
+  useEffect(() => {
+    if (!runStartedAt) { setElapsedMs(0); return; }
+    if (completedAt) { setElapsedMs(completedAt - runStartedAt); return; }
+    const id = setInterval(() => setElapsedMs(Date.now() - runStartedAt), 500);
+    return () => clearInterval(id);
+  }, [runStartedAt, completedAt]);
+
+  // ──────────────────────────────────────────────────────────────
+  // Event reducer
+  // ──────────────────────────────────────────────────────────────
   const applyEvent = useCallback((row: RunEventRow) => {
-    // CR-02: dedup + order on the DB's monotonic identity `id`, not the
-    // step-local `seq` (which can collide across workflow step retries).
     if (row.id !== undefined && seqSeen.current.has(row.id)) return;
     if (row.id !== undefined) seqSeen.current.add(row.id);
     const p = row.payload || {};
+    const now = Date.now();
+    // Terminal events use the row's wall-clock timestamp (so resuming an old
+    // completed run reflects the real run duration, not "right now").
+    const eventTs = row.created_at ? new Date(row.created_at).getTime() : now;
+
+    // First event we ever see anchors the run start time (resume-friendly).
+    setRunStartedAt((prev) => {
+      if (prev) return prev;
+      return eventTs;
+    });
 
     switch (row.type) {
       case 'cos_start':
-        setPhase(PHASE_LABEL.cos_start);
+        setPhase((cur) => (cur === 'IDLE' ? 'COMPOSING' : cur));
         break;
-      case 'team_plan':
-        setPhase(PHASE_LABEL.team_plan);
+
+      case 'team_plan': {
+        const planRaw = (p.plan ?? {}) as { agents?: PlanAgentLike[] };
+        const planAgents = Array.isArray(planRaw.agents) ? planRaw.agents : [];
+        // Seed every planned agent as 'queued' so dependency lines can render
+        // BEFORE each agent_start fires (which fills in color/model).
+        setAgents((prev) => {
+          const out = { ...prev };
+          for (const a of planAgents) {
+            if (!a.id) continue;
+            if (!out[a.id]) {
+              out[a.id] = {
+                id: a.id,
+                title: a.title ?? a.id,
+                color: '#f59e0b',
+                model: '',
+                source: a.source === 'spawn' ? 'spawn' : 'library',
+                content: '',
+                status: 'queued',
+                dependsOn: Array.isArray(a.dependsOn) ? a.dependsOn : [],
+              };
+            } else {
+              // refresh dependsOn from the authoritative plan
+              out[a.id] = { ...out[a.id], dependsOn: Array.isArray(a.dependsOn) ? a.dependsOn : out[a.id].dependsOn };
+            }
+          }
+          return out;
+        });
+        setAgentOrder((prev) => {
+          const seen = new Set(prev);
+          const append: string[] = [];
+          for (const a of planAgents) {
+            if (a.id && !seen.has(a.id)) { append.push(a.id); seen.add(a.id); }
+          }
+          return [...prev, ...append];
+        });
+        setPhase((cur) => (cur === 'COMPOSING' || cur === 'IDLE' ? 'PROVISIONING' : cur));
         break;
+      }
+
       case 'cfo_decision':
         setCfoNote(String(p.note ?? ''));
         break;
+
       case 'agent_start': {
         const id = String(p.agentId);
+        // Critic / Synthesizer / Trainer are meta-stations — they own the hero
+        // slot during their own phase rather than appearing as roster cards.
+        if (id === 'critic' || id === 'synthesizer' || id === 'trainer') break;
         setAgents((prev) => ({
           ...prev,
           [id]: {
             id,
-            title: String(p.agentTitle ?? id),
-            color: String(p.agentColor ?? '#888'),
-            model: String(p.model ?? ''),
-            source: String(p.source ?? 'library'),
+            title: String(p.agentTitle ?? prev[id]?.title ?? id),
+            color: String(p.agentColor ?? prev[id]?.color ?? '#f59e0b'),
+            model: String(p.model ?? prev[id]?.model ?? ''),
+            source: String(p.source ?? prev[id]?.source ?? 'library'),
             content: prev[id]?.content ?? '',
             status: 'working',
+            dependsOn: prev[id]?.dependsOn ?? [],
+            startedAt: now,
+            lastTick: now,
           },
         }));
         setAgentOrder((prev) => (prev.includes(id) ? prev : [...prev, id]));
+        setPhase((cur) =>
+          cur === 'PROVISIONING' || cur === 'COMPOSING' || cur === 'IDLE' ? 'EXECUTING' : cur
+        );
         break;
       }
+
       case 'agent_content': {
         const id = String(p.agentId);
-        setAgents((prev) =>
-          prev[id] ? { ...prev, [id]: { ...prev[id], content: String(p.content ?? '') } } : prev
-        );
+        setAgents((prev) => patchAgent(prev, id, { content: String(p.content ?? ''), status: 'working' }));
         break;
       }
+
+      case 'agent_delta': {
+        // Critic, Synthesizer (and Trainer) stream through this channel.
+        const id = String(p.agentId);
+        const delta = String(p.delta ?? '');
+        if (id === 'critic') setCriticBody((b) => b + delta);
+        else if (id === 'synthesizer') setSynBody((b) => b + delta);
+        // Trainer deltas are intentionally ignored in the UI per spec
+        // (we only flip the "TRAINER COMPLETE" pill once trainer_done fires).
+        break;
+      }
+
       case 'agent_done': {
         const id = String(p.agentId);
+        if (id === 'critic' || id === 'synthesizer' || id === 'trainer') break;
+        const artifact = p.artifact ? String(p.artifact) : '';
+        const doneOrder = ++doneCounter.current;
         setAgents((prev) =>
-          prev[id]
-            ? { ...prev, [id]: { ...prev[id], status: 'done', content: p.artifact ? String(p.artifact) : prev[id].content } }
-            : prev
+          patchAgent(prev, id, {
+            status: 'done',
+            content: artifact || prev[id]?.content || '',
+            doneOrder,
+          })
         );
         break;
       }
+
       case 'critic_start':
-        setPhase(PHASE_LABEL.critic_start);
+        setPhase('CRITIQUING');
         break;
       case 'synthesis_start':
-        setPhase(PHASE_LABEL.synthesis_start);
+        setPhase('SYNTHESIZING');
         break;
       case 'answer':
         setAnswer(String(p.artifact ?? ''));
+        setPhase('DELIVERED');
         break;
       case 'trainer_start':
-        setPhase(PHASE_LABEL.trainer_start);
+        // do not change phase — answer is up, trainer runs in background
         break;
       case 'trainer_done':
-        setTrainer(String(p.artifact ?? ''));
+        setTrainerDone(true);
         break;
       case 'run_complete':
-        setPhase(PHASE_LABEL.run_complete);
+        setPhase('COMPLETE');
         setRunning(false);
+        setCompletedAt(eventTs);
+        setTotals({
+          usd: typeof p.totalCostUsd === 'number' ? p.totalCostUsd : null,
+          ceilingUsd: typeof p.ceilingUsd === 'number' ? p.ceilingUsd : 1.2,
+          agents: typeof p.agentCount === 'number' ? p.agentCount : 0,
+          inTok: typeof p.inTok === 'number' ? p.inTok : 0,
+          outTok: typeof p.outTok === 'number' ? p.outTok : 0,
+        });
         break;
       case 'run_error':
-        setError(String(p.error ?? 'Run failed'));
+        setPhase('ERRORED');
+        setErrorMsg(String(p.error ?? 'Run failed'));
         setRunning(false);
+        setCompletedAt(eventTs);
         break;
     }
   }, []);
 
-  // Subscribe to a job's events via Realtime + backfill any already-written rows.
+  // ──────────────────────────────────────────────────────────────
+  // Realtime subscription + backfill
+  // ──────────────────────────────────────────────────────────────
   const subscribe = useCallback(
     (id: string) => {
       if (!isSupabaseConfiguredClient()) return;
       const sb = getBrowserSupabase();
 
-      // Backfill existing rows (resumability — survives reload / laptop close)
       sb.from('run_events')
-        .select('id,type,payload')
+        .select('id,type,payload,created_at')
         .eq('run_id', id)
         .order('id', { ascending: true })
         .then(({ data }) => {
-          (data ?? []).forEach((r) => applyEvent(r as RunEventRow));
+          const rows = (data ?? []) as RunEventRow[];
+          rows.forEach((r) => applyEvent(r));
+          // Legacy-run fallback: runs that completed BEFORE the run_complete
+          // emit was deployed have an `answer` event but no terminal event.
+          // If we backfilled an answer and no run_complete/run_error followed,
+          // collapse to a completed state so the UI doesn't stay "RUNNING…".
+          const hasAnswer = rows.some((r) => r.type === 'answer');
+          const hasTerminal = rows.some((r) => r.type === 'run_complete' || r.type === 'run_error');
+          if (hasAnswer && !hasTerminal) {
+            const lastTs = rows[rows.length - 1]?.created_at;
+            setPhase('COMPLETE');
+            setRunning(false);
+            setCompletedAt(lastTs ? new Date(lastTs).getTime() : Date.now());
+            // totals stay null — the legacy run didn't ship cost data
+          }
         });
 
       const channel = sb
@@ -147,39 +276,45 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
         )
         .subscribe();
 
-      const cleanup = () => {
-        sb.removeChannel(channel);
-      };
+      const cleanup = () => sb.removeChannel(channel);
       cleanupRef.current = cleanup;
       return cleanup;
     },
     [applyEvent]
   );
 
-  // Resume an in-progress / past job if a jobId was provided. If the run already
-  // finished, the backfilled run_complete event flips running→false.
   useEffect(() => {
-    if (resumeJobId) {
-      setRunning(true);
-      return subscribe(resumeJobId);
-    }
+    if (!resumeJobId) return;
+    setRunning(true);
+    const cleanup = subscribe(resumeJobId);
+    // Wrap cleanup so we return a sync void destructor (subscribe's cleanup
+    // returns a Promise, which React's EffectCallback type doesn't accept).
+    return () => { cleanup?.(); };
   }, [resumeJobId, subscribe]);
 
+  // ──────────────────────────────────────────────────────────────
+  // Run / reset
+  // ──────────────────────────────────────────────────────────────
   const resetState = () => {
     cleanupRef.current?.();
     cleanupRef.current = null;
-    setError('');
+    setErrorMsg('');
+    setPhase('IDLE');
     setAgents({});
     setAgentOrder([]);
     setCfoNote('');
-    setCritic('');
+    setCriticBody('');
+    setSynBody('');
     setAnswer('');
-    setTrainer('');
-    setPhase('');
+    setTrainerDone(false);
+    setRunStartedAt(null);
+    setCompletedAt(null);
+    setTotals(null);
+    setElapsedMs(0);
     seqSeen.current = new Set();
+    doneCounter.current = 0;
   };
 
-  // Clear the current view and return to a fresh input (used after completion).
   const startFresh = () => {
     resetState();
     setJobId(null);
@@ -192,8 +327,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
     if (!problem.trim() || running) return;
     resetState();
     setRunning(true);
-    setPhase('Submitting…');
-
+    setRunStartedAt(Date.now());
     try {
       const res = await fetch('/api/run-dynamic', {
         method: 'POST',
@@ -203,139 +337,38 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to start');
       setJobId(data.jobId);
-      // Put the jobId in the URL so a reload (or closing + reopening) resumes
-      // this exact run from Supabase instead of losing it.
       if (typeof window !== 'undefined') {
         window.history.replaceState(null, '', `/company?job=${data.jobId}`);
       }
       subscribe(data.jobId);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to start');
+      setErrorMsg(e instanceof Error ? e.message : 'Failed to start');
+      setPhase('ERRORED');
       setRunning(false);
     }
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Input — always available so you can start/restart anytime */}
-      <div className="rounded-lg p-4" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
-          <div className="flex items-center justify-between mb-2">
-            <div style={{ fontSize: '0.58rem', color: 'var(--text-muted)', letterSpacing: '0.1em', fontWeight: 700 }}>
-              BRING A PROBLEM TO THE COMPANY
-            </div>
-            {(isComplete || jobId) && !running && (
-              <button onClick={startFresh} style={{ fontSize: '0.52rem', color: '#f59e0b', background: 'transparent', border: '1px solid rgba(245,158,11,0.3)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '0.06em' }}>
-                + NEW RUN
-              </button>
-            )}
-          </div>
-          <div className="flex gap-3 items-start">
-            <textarea
-              value={problem}
-              onChange={(e) => setProblem(e.target.value)}
-              placeholder="Anything — 'what stocks should I buy this week', 'design a brand for X', 'build me a Y'. The Chief of Staff composes the right team and ships an answer."
-              disabled={running}
-              rows={2}
-              style={{
-                flex: 1, background: 'var(--bg-base)', border: '1px solid var(--border-bright)', borderRadius: 6,
-                padding: '10px 12px', color: 'var(--text-primary)', fontSize: '0.72rem', fontFamily: 'inherit',
-                resize: 'none', outline: 'none', lineHeight: 1.6, opacity: running ? 0.5 : 1,
-              }}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); run(); } }}
-            />
-            <button
-              onClick={run}
-              disabled={running || !problem.trim()}
-              style={{
-                background: running || !problem.trim() ? 'var(--bg-elevated)' : '#f59e0b',
-                color: running || !problem.trim() ? 'var(--text-muted)' : '#06060f', border: 'none', borderRadius: 6,
-                padding: '10px 20px', fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.12em',
-                cursor: running || !problem.trim() ? 'not-allowed' : 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
-              }}
-            >
-              {running ? 'RUNNING…' : 'DEPLOY TEAM'}
-            </button>
-          </div>
-          {jobId && (
-            <div style={{ fontSize: '0.55rem', color: 'var(--text-dim)', marginTop: 8 }}>
-              Job {jobId.slice(0, 8)} — runs in the background. You can close this tab; check{' '}
-              <a href="/history" style={{ color: '#f59e0b' }}>History</a> later for the answer.
-            </div>
-          )}
-      </div>
-
-      {/* Phase + CFO */}
-      {(phase || cfoNote) && (
-        <div className="flex items-center gap-3 flex-wrap">
-          {phase && (
-            <span style={{ fontSize: '0.6rem', color: '#f59e0b', letterSpacing: '0.06em' }}>
-              {running && '◌ '}{phase}
-            </span>
-          )}
-          {cfoNote && (
-            <span style={{ fontSize: '0.55rem', color: 'var(--text-muted)', background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 4, padding: '2px 8px' }}>
-              {cfoNote}
-            </span>
-          )}
-        </div>
-      )}
-
-      {error && (
-        <div style={{ fontSize: '0.62rem', color: '#ef4444', background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 6, padding: '8px 12px' }}>
-          ✕ {error}
-        </div>
-      )}
-
-      {/* ANSWER — most prominent, top when present */}
-      {answer && (
-        <div className="rounded-lg p-5 slide-in" style={{ background: 'var(--bg-panel)', border: '1px solid rgba(245,158,11,0.35)', boxShadow: '0 0 24px rgba(245,158,11,0.1)' }}>
-          <div style={{ fontSize: '0.6rem', fontWeight: 700, color: '#f59e0b', letterSpacing: '0.16em', marginBottom: 8 }}>
-            ⬡ THE ANSWER
-          </div>
-          <div className="agent-prose">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
-          </div>
-        </div>
-      )}
-
-      {/* Agent cards */}
-      {agentOrder.length > 0 && (
-        <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
-          {agentOrder.map((id) => {
-            const a = agents[id];
-            if (!a) return null;
-            return (
-              <div key={id} className="rounded-lg overflow-hidden flex flex-col" style={{ background: 'var(--bg-panel)', border: `1px solid ${a.status === 'working' ? a.color + '55' : 'var(--border)'}`, minHeight: 160 }}>
-                <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-elevated)' }}>
-                  <div className="flex items-center gap-2">
-                    <div style={{ width: 7, height: 7, borderRadius: '50%', background: a.color, boxShadow: a.status === 'working' ? `0 0 6px ${a.color}` : 'none' }} />
-                    <span style={{ fontSize: '0.62rem', fontWeight: 700, color: a.color, letterSpacing: '0.04em' }}>{a.title}</span>
-                    {a.source === 'spawn' && <span style={{ fontSize: '0.5rem', color: 'var(--text-dim)' }}>⚡spawned</span>}
-                  </div>
-                  <span style={{ fontSize: '0.48rem', color: 'var(--text-dim)' }}>
-                    {a.model.includes('haiku') ? 'HAIKU' : a.model.includes('sonnet') ? 'SONNET' : ''}
-                  </span>
-                </div>
-                <div className="p-3 overflow-y-auto agent-prose" style={{ maxHeight: 280, fontSize: '0.62rem' }}>
-                  {a.content ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content}</ReactMarkdown> : <span style={{ color: 'var(--text-dim)' }}>working…</span>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Critic + Trainer (collapsible-ish secondary) */}
-      {trainer && (
-        <details className="rounded-lg" style={{ background: 'var(--bg-panel)', border: '1px solid rgba(236,72,153,0.25)' }}>
-          <summary style={{ fontSize: '0.6rem', fontWeight: 700, color: '#ec4899', letterSpacing: '0.12em', padding: '10px 14px', cursor: 'pointer' }}>
-            TRAINER SCORES
-          </summary>
-          <div className="agent-prose p-4" style={{ borderTop: '1px solid var(--border)' }}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{trainer}</ReactMarkdown>
-          </div>
-        </details>
-      )}
-    </div>
+    <CompanyBentoBoard
+      agents={agents}
+      order={agentOrder}
+      phase={phase}
+      cfoNote={cfoNote}
+      criticBody={criticBody}
+      synBody={synBody}
+      trainerDone={trainerDone}
+      running={running}
+      errorMsg={errorMsg}
+      answer={answer}
+      jobId={jobId}
+      runStartedAt={runStartedAt}
+      completedAt={completedAt}
+      elapsedMs={elapsedMs}
+      totals={totals}
+      problem={problem}
+      setProblem={setProblem}
+      onSubmit={run}
+      onNewRun={startFresh}
+    />
   );
 }

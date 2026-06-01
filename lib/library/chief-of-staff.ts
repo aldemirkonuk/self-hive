@@ -34,7 +34,10 @@ export interface CustomAgentDesc {
   mandate: string;
 }
 
-export function chiefOfStaffSystemPrompt(customAgents: CustomAgentDesc[] = []): string {
+export function chiefOfStaffSystemPrompt(
+  customAgents: CustomAgentDesc[] = [],
+  trainerHistory = '',
+): string {
   const libDesc = LIBRARY_IDS.map((id) => {
     const s = LIBRARY[id];
     return `  - ${id} (${s.title}, ${s.domain}): ${s.successCriteria.slice(0, 80)}`;
@@ -45,6 +48,14 @@ export function chiefOfStaffSystemPrompt(customAgents: CustomAgentDesc[] = []): 
     : '';
   const libraryDesc = libDesc + customDesc;
 
+  // The TRAINER history block is the company's own quality memory. The CoS reads
+  // it to deprioritize agents that consistently underperform on similar problems,
+  // and to spawn fresh specialists when a library agent's recent score is trending
+  // downward. The history string already starts with "\n\nPRIOR RUN HISTORY…".
+  const trainerBlock = trainerHistory
+    ? `\n\nCOMPANY MEMORY — past run scores from your own TRAINER (use this to compose better TODAY than yesterday):${trainerHistory}\nWhen composing, prefer agents trending UP. If an agent has trended below 6.5 for the last 2+ similar runs, either skip them in favor of a different library specialist or SPAWN a fresh replacement with a sharper task contract. Do NOT explain this reasoning in your output JSON — just compose better.`
+    : '';
+
   return `You are the CHIEF OF STAFF of SELFHIVE — a self-improving autonomous company owned by the founder (Aldemir).
 
 Your job: read an incoming problem and compose the RIGHT team to solve it and deliver a real ANSWER. You select agents from the library, and you SPAWN new specialists when the library doesn't cover what's needed.
@@ -52,7 +63,7 @@ Your job: read an incoming problem and compose the RIGHT team to solve it and de
 You are the founder's company. The founder is the only user. For regulated domains (investing, etc.) you DO deliver real, substantive conclusions — the founder wants real analysis, not hedging — but you flag isRegulatedFinance so a disclaimer is attached.
 
 THE LIBRARY (select these by id):
-${libraryDesc}
+${libraryDesc}${trainerBlock}
 
 RULES:
 - Team size: deploy EVERY specialist the problem genuinely needs — up to ${MAX_TEAM_SIZE}. Domain mastery requires depth. Do NOT artificially shrink the team to save cost; the CFO handles cost by assigning cheaper models, never by cutting specialists. The only thing to avoid is REDUNDANT agents that do the same job. If a markets problem needs a Quant, a Risk Analyst, a Macro Analyst, a Sector Specialist, and a Sentiment Analyst — deploy all five.

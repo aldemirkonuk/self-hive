@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SELFHIVE — /company agent layouts (run state)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0806;
+    --surface: #110d0a;
+    --surface-2: #14100b;
+    --elevated: #18130d;
+    --border: #2c2519;
+    --border-2: #3d3324;
+    --amber: #f59e0b;
+    --text: #fbf5dd;
+    --muted: rgba(251, 245, 221, 0.58);
+    --dim: rgba(251, 245, 221, 0.3);
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+    --pm: #3b82f6; --cto: #8b5cf6; --eng: #10b981; --qa: #ef4444; --ceo: #f59e0b;
+    --trainer: #ec4899;
+    --risk: #ef4444; --quant: #06b6d4; --mkt: #8b5cf6; --fin: #22c55e; --cos: #f59e0b; --syn: #06b6d4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--mono); font-size: 12px; line-height: 1.45;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background-image:
+      linear-gradient(rgba(245,158,11,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(245,158,11,0.02) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .sheet { position: relative; z-index: 1; max-width: 1400px; margin: 0 auto; padding: 32px 28px 80px; }
+  .head { border-bottom: 1px solid var(--border); padding-bottom: 18px; margin-bottom: 28px; }
+  .head h1 { font-size: 13px; letter-spacing: 0.18em; color: var(--amber); margin: 0 0 6px; }
+  .head .sub { font-size: 11px; color: var(--muted); letter-spacing: 0.1em; }
+  .context {
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 8px; padding: 14px 16px; margin-bottom: 28px;
+  }
+  .context .row { display: flex; gap: 12px; align-items: flex-start; }
+  .context .grow { flex: 1; }
+  .context .lbl { font-size: 10px; letter-spacing: 0.1em; font-weight: 700; color: var(--muted); margin-bottom: 6px; }
+  .context textarea {
+    width: 100%; height: 52px; background: var(--bg); border: 1px solid var(--border-2);
+    border-radius: 6px; color: var(--muted); font-family: inherit; font-size: 11px; padding: 8px 10px;
+  }
+  .context .btn {
+    background: var(--amber); color: #06060f; border: none; border-radius: 6px;
+    padding: 10px 16px; font-family: inherit; font-size: 10px; font-weight: 700; letter-spacing: 0.12em;
+  }
+  .phase { font-size: 11px; color: var(--amber); margin: 10px 0 0; letter-spacing: 0.06em; }
+  .phase span { color: var(--muted); margin-left: 8px; font-size: 10px; }
+
+  .variations { display: flex; flex-direction: column; gap: 36px; }
+  .frame {
+    border: 1px solid var(--border); background: var(--bg); position: relative;
+  }
+  .frame-label {
+    position: absolute; top: -1px; left: -1px; z-index: 2;
+    background: var(--bg); border: 1px solid var(--border); border-top: none; border-left: none;
+    padding: 5px 12px; font-size: 10px; letter-spacing: 0.18em; color: var(--amber);
+  }
+  .frame-tag {
+    position: absolute; top: -1px; right: -1px; z-index: 2;
+    background: var(--bg); border: 1px solid var(--border); border-top: none; border-right: none;
+    padding: 5px 12px; font-size: 10px; letter-spacing: 0.12em; color: var(--muted);
+  }
+  .frame-body { padding: 40px 16px 16px; min-height: 320px; }
+  .frame-foot {
+    border-top: 1px solid var(--border); padding: 10px 14px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 10px;
+  }
+  .frame-foot .pro { color: #6fb98a; line-height: 1.5; }
+  .frame-foot .con { color: #ff9a9a; line-height: 1.5; opacity: 0.85; }
+  .rec { border-color: rgba(245, 158, 11, 0.45); box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.12); }
+  .rec .frame-tag { color: var(--amber); }
+
+  /* Shared agent card atoms */
+  .card {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; display: flex; flex-direction: column;
+    min-height: 120px;
+  }
+  .card.working { border-color: color-mix(in srgb, var(--ac) 40%, var(--border)); box-shadow: 0 0 20px -6px color-mix(in srgb, var(--ac) 35%, transparent); }
+  .card.done { opacity: 0.72; }
+  .card .hd {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 7px 10px; border-bottom: 1px solid var(--border); background: var(--elevated);
+    font-size: 10px; font-weight: 700;
+  }
+  .card .id { display: flex; align-items: center; gap: 6px; color: var(--ac); letter-spacing: 0.04em; }
+  .card .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ac); flex-shrink: 0; }
+  .card.working .dot { box-shadow: 0 0 6px var(--ac); }
+  .card .tier { font-size: 9px; color: var(--dim); font-weight: 500; }
+  .card .bd { padding: 8px 10px; font-size: 10px; color: var(--muted); line-height: 1.5; flex: 1; }
+  .card .stream { display: flex; flex-direction: column; gap: 4px; padding: 0 10px 10px; }
+  .card .stream span { height: 3px; border-radius: 1px; background: var(--border-2); display: block; }
+  .card.working .stream span { background: color-mix(in srgb, var(--ac) 50%, var(--border)); animation: pulse 1.2s ease infinite; }
+  .card.working .stream span:nth-child(2) { animation-delay: 0.15s; width: 72% !important; }
+  .card.working .stream span:nth-child(3) { animation-delay: 0.3s; width: 58% !important; }
+  @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  .status {
+    font-size: 8px; letter-spacing: 0.1em; padding: 1px 5px; border-radius: 3px;
+    border: 1px solid var(--border);
+  }
+  .status.work { color: var(--ac); border-color: color-mix(in srgb, var(--ac) 40%, transparent); background: color-mix(in srgb, var(--ac) 8%, transparent); }
+  .status.done { color: #6fb98a; border-color: rgba(16,185,129,0.3); }
+  .status.wait { color: var(--dim); }
+
+  /* A — CURRENT: auto-fill grid (prod today) */
+  .layout-a {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+
+  /* B — Execution layers (matches orchestrator layers) */
+  .layout-b { display: flex; flex-direction: column; gap: 14px; }
+  .layer-row { display: flex; flex-direction: column; gap: 8px; }
+  .layer-lbl {
+    font-size: 9px; letter-spacing: 0.16em; color: var(--muted);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .layer-lbl::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .layer-cards { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .layer-connector {
+    text-align: center; font-size: 9px; color: var(--dim); letter-spacing: 0.12em; padding: 2px 0;
+  }
+
+  /* C — Bento: active agent spans 2 cols */
+  .layout-c {
+    display: grid; gap: 10px;
+    grid-template-columns: repeat(4, 1fr);
+    grid-auto-rows: minmax(130px, auto);
+  }
+  .layout-c .card.hero {
+    grid-column: span 2; grid-row: span 2; min-height: 200px;
+  }
+  .layout-c .card.hero .bd { font-size: 11px; }
+
+  /* D — Swim lanes by work type */
+  .layout-d {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: stretch;
+  }
+  .lane {
+    border: 1px dashed var(--border-2); border-radius: 8px; padding: 10px;
+    display: flex; flex-direction: column; gap: 8px; min-height: 280px;
+  }
+  .lane-hd { font-size: 9px; letter-spacing: 0.18em; color: var(--amber); margin-bottom: 4px; }
+  .lane .card { min-height: 100px; }
+
+  .team-strip {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; align-items: center;
+  }
+  .chip {
+    font-size: 9px; letter-spacing: 0.08em; padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .chip.live { color: var(--amber); border-color: rgba(245,158,11,0.35); }
+
+  .sketch-tag {
+    position: fixed; bottom: 14px; right: 14px; z-index: 5;
+    font-size: 9px; letter-spacing: 0.12em; color: var(--amber);
+    border: 1px solid var(--border-2); background: rgba(17,13,10,0.92); padding: 6px 10px;
+  }
+</style>
+</head>
+<body>
+
+<main class="sheet">
+  <header class="head">
+    <h1>SELFHIVE / COMPANY — AGENT LAYOUTS</h1>
+    <div class="sub">SHEET 04 · RUN STATE AFTER SUBMIT · DYNAMIC TEAM (NOT FIXED PIPELINE)</div>
+  </header>
+
+  <!-- Shared “submitted” chrome -->
+  <section class="context">
+    <div class="row">
+      <div class="grow">
+        <div class="lbl">SUBMIT A PROBLEM TO THE HIVE</div>
+        <textarea readonly>Should I overweight US tech for the next 6 months given rates and AI capex?</textarea>
+      </div>
+      <button type="button" class="btn" disabled>RUNNING…</button>
+    </div>
+    <div class="phase">◌ Layer 2 executing <span>· CFO: 3× Haiku · 2× Sonnet · web search on</span></div>
+    <div class="team-strip">
+      <span style="font-size:9px;color:var(--dim);letter-spacing:0.12em">TEAM COMPOSED:</span>
+      <span class="chip live">Chief of Staff</span>
+      <span class="chip">Market Researcher</span>
+      <span class="chip">Risk Analyst</span>
+      <span class="chip">Quant Analyst</span>
+      <span class="chip">Financial Advisor</span>
+      <span class="chip">Synthesizer</span>
+      <span class="chip">Critic</span>
+    </div>
+  </section>
+
+  <div class="variations">
+
+    <!-- A — production today -->
+    <article class="frame">
+      <div class="frame-label">A · CURRENT PROD</div>
+      <div class="frame-tag">auto-fill grid · minmax(280px)</div>
+      <div class="frame-body">
+        <div class="layout-a">
+          <div class="card done" style="--ac:var(--mkt)"><div class="hd"><div class="id"><span class="dot"></span>Market Researcher</div><span class="status done">DONE</span></div><div class="bd">Catalysts through Q3…</div></div>
+          <div class="card working" style="--ac:var(--risk)"><div class="hd"><div class="id"><span class="dot"></span>Risk Analyst</div><span class="status work">WORKING</span></div><div class="bd">Downside scenarios…</div><div class="stream"><span style="width:88%"></span><span></span><span style="width:65%"></span></div></div>
+          <div class="card working" style="--ac:var(--quant)"><div class="hd"><div class="id"><span class="dot"></span>Quant Analyst</div><span class="status work">WORKING</span></div><div class="bd">Pulling multiples…</div><div class="stream"><span style="width:76%"></span><span style="width:90%"></span><span></span></div></div>
+          <div class="card done" style="--ac:var(--cos)"><div class="hd"><div class="id"><span class="dot"></span>Chief of Staff</div><span class="status done">DONE</span></div><div class="bd">Team plan locked.</div></div>
+          <div class="card" style="--ac:var(--fin);opacity:0.45"><div class="hd"><div class="id"><span class="dot"></span>Financial Advisor</div><span class="status wait">QUEUED</span></div><div class="bd">Waiting on layer 2…</div></div>
+          <div class="card" style="--ac:var(--syn);opacity:0.45"><div class="hd"><div class="id"><span class="dot"></span>Synthesizer</div><span class="status wait">QUEUED</span></div><div class="bd">—</div></div>
+        </div>
+      </div>
+      <div class="frame-foot">
+        <div class="pro">+ Already shipped · scales to N agents · familiar card UI</div>
+        <div class="con">− No dependency story · active agents same size as done · order = spawn time</div>
+      </div>
+    </article>
+
+    <!-- B — layers (recommended for company) -->
+    <article class="frame rec">
+      <div class="frame-label">B · RECOMMENDED</div>
+      <div class="frame-tag">execution layers · parallel rows</div>
+      <div class="frame-body">
+        <div class="layout-b">
+          <div class="layer-row">
+            <div class="layer-lbl">LAYER 0 · COMPOSE</div>
+            <div class="layer-cards" style="grid-template-columns: 1fr 1fr;">
+              <div class="card done" style="--ac:var(--cos)"><div class="hd"><div class="id"><span class="dot"></span>Chief of Staff</div><span class="status done">DONE</span></div><div class="bd">6 agents · dependency graph</div></div>
+              <div class="card done" style="--ac:var(--ceo)"><div class="hd"><div class="id"><span class="dot"></span>CFO</div><span class="status done">DONE</span></div><div class="bd">Haiku×3 Sonnet×2</div></div>
+            </div>
+          </div>
+          <div class="layer-connector">▼ parallel</div>
+          <div class="layer-row">
+            <div class="layer-lbl">LAYER 1 · RESEARCH (parallel)</div>
+            <div class="layer-cards">
+              <div class="card done" style="--ac:var(--mkt)"><div class="hd"><div class="id"><span class="dot"></span>Market Researcher</div><span class="status done">DONE</span></div><div class="bd">Live news + sentiment</div></div>
+            </div>
+          </div>
+          <div class="layer-connector">▼ parallel</div>
+          <div class="layer-row">
+            <div class="layer-lbl">LAYER 2 · ANALYSIS (parallel)</div>
+            <div class="layer-cards">
+              <div class="card working" style="--ac:var(--risk)"><div class="hd"><div class="id"><span class="dot"></span>Risk Analyst</div><span class="status work">WORKING</span></div><div class="bd">3 downside scenarios…</div><div class="stream"><span style="width:82%"></span><span style="width:70%"></span></div></div>
+              <div class="card working" style="--ac:var(--quant)"><div class="hd"><div class="id"><span class="dot"></span>Quant Analyst</div><span class="status work">WORKING</span></div><div class="bd">P/E vs 5y median…</div><div class="stream"><span style="width:90%"></span><span style="width:55%"></span></div></div>
+            </div>
+          </div>
+          <div class="layer-connector">▼ sequential next</div>
+          <div class="layer-row">
+            <div class="layer-lbl">LAYER 3 · CONVERGE</div>
+            <div class="layer-cards" style="grid-template-columns: 1fr 1fr 1fr;">
+              <div class="card" style="--ac:var(--fin);opacity:0.5"><div class="hd"><div class="id"><span class="dot"></span>Financial Advisor</div><span class="status wait">NEXT</span></div></div>
+              <div class="card" style="--ac:var(--syn);opacity:0.35"><div class="hd"><div class="id"><span class="dot"></span>Synthesizer</div><span class="status wait">WAIT</span></div></div>
+              <div class="card" style="--ac:#ef4444;opacity:0.35"><div class="hd"><div class="id"><span class="dot"></span>Critic</div><span class="status wait">WAIT</span></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-foot">
+        <div class="pro">+ Mirrors orchestrator layers · shows who blocks whom · parallel = same row</div>
+        <div class="con">− Taller page · needs layer metadata from run events</div>
+      </div>
+    </article>
+
+    <!-- C — bento focus -->
+    <article class="frame">
+      <div class="frame-label">C · BENTO FOCUS</div>
+      <div class="frame-tag">hero card = active agent</div>
+      <div class="frame-body">
+        <div class="layout-c">
+          <div class="card done" style="--ac:var(--mkt)"><div class="hd"><div class="id"><span class="dot"></span>MKT</div><span class="status done">DONE</span></div></div>
+          <div class="card done" style="--ac:var(--cos)"><div class="hd"><div class="id"><span class="dot"></span>COS</div><span class="status done">DONE</span></div></div>
+          <div class="card hero working" style="--ac:var(--risk)">
+            <div class="hd"><div class="id"><span class="dot"></span>Risk Analyst</div><span class="status work">WORKING · SONNET</span></div>
+            <div class="bd">## Downside Scenarios<br/>1. Rates re-accelerate — prob 35% — mag 7 drawdown 18%…<br/>2. AI capex disappointment…</div>
+            <div class="stream"><span style="width:92%"></span><span style="width:80%"></span><span style="width:66%"></span><span style="width:40%"></span></div>
+          </div>
+          <div class="card working" style="--ac:var(--quant)"><div class="hd"><div class="id"><span class="dot"></span>Quant</div><span class="status work">WORK</span></div><div class="stream"><span style="width:70%"></span><span></span></div></div>
+          <div class="card" style="--ac:var(--fin);opacity:0.4"><div class="hd"><div class="id"><span class="dot"></span>FA</div><span class="status wait">WAIT</span></div></div>
+          <div class="card" style="--ac:var(--syn);opacity:0.35"><div class="hd"><div class="id"><span class="dot"></span>SYN</div><span class="status wait">WAIT</span></div></div>
+        </div>
+      </div>
+      <div class="frame-foot">
+        <div class="pro">+ Readable streaming output · one focal agent · good on wide screens</div>
+        <div class="con">− Uneven on mobile · only one “hero” when many run in parallel</div>
+      </div>
+    </article>
+
+    <!-- D — swim lanes -->
+    <article class="frame">
+      <div class="frame-label">D · SWIM LANES</div>
+      <div class="frame-tag">research · analysis · ship</div>
+      <div class="frame-body">
+        <div class="layout-d">
+          <div class="lane">
+            <div class="lane-hd">RESEARCH</div>
+            <div class="card done" style="--ac:var(--mkt)"><div class="hd"><div class="id"><span class="dot"></span>Market Researcher</div><span class="status done">DONE</span></div><div class="bd">Landscape + catalysts</div></div>
+          </div>
+          <div class="lane">
+            <div class="lane-hd">ANALYSIS</div>
+            <div class="card working" style="--ac:var(--risk)"><div class="hd"><div class="id"><span class="dot"></span>Risk Analyst</div><span class="status work">WORKING</span></div><div class="stream"><span style="width:85%"></span><span></span></div></div>
+            <div class="card working" style="--ac:var(--quant)"><div class="hd"><div class="id"><span class="dot"></span>Quant Analyst</div><span class="status work">WORKING</span></div><div class="stream"><span style="width:78%"></span><span></span></div></div>
+          </div>
+          <div class="lane">
+            <div class="lane-hd">SHIP</div>
+            <div class="card" style="--ac:var(--fin);opacity:0.45"><div class="hd"><div class="id"><span class="dot"></span>Financial Advisor</div><span class="status wait">WAIT</span></div></div>
+            <div class="card" style="--ac:var(--syn);opacity:0.35"><div class="hd"><div class="id"><span class="dot"></span>Synthesizer</div><span class="status wait">WAIT</span></div></div>
+            <div class="card" style="--ac:#ef4444;opacity:0.35"><div class="hd"><div class="id"><span class="dot"></span>Critic</div><span class="status wait">WAIT</span></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="frame-foot">
+        <div class="pro">+ Domain grouping at a glance · stable columns</div>
+        <div class="con">− Agents span lanes awkwardly (CoS/CFO?) · less faithful to DAG</div>
+      </div>
+    </article>
+
+  </div>
+</main>
+
+<div class="sketch-tag">SKETCH 04 · /company run state · not production</div>
+</body>
+</html>

@@ -67,6 +67,12 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
   const seqSeen = useRef<Set<number>>(new Set());
   const doneCounter = useRef(0);
   const cleanupRef = useRef<(() => void) | null>(null);
+  // Highest run_events.id we've applied. Drives the polling backup's catch-up
+  // query (SELECT WHERE id > maxSeqRef.current) so we only fetch deltas.
+  const maxSeqRef = useRef<number>(-1);
+  // Mirror of `phase` accessible inside intervals without re-creating them
+  // every state change. Updated by a tiny effect just below.
+  const phaseRef = useRef<PhaseId>('IDLE');
 
   // ── elapsed ticker: live while running, freezes at completion ──
   useEffect(() => {
@@ -76,12 +82,50 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
     return () => clearInterval(id);
   }, [runStartedAt, completedAt]);
 
+  // ── phaseRef mirror ─────────────────────────────────────────────
+  // Polling reads this inside its interval so the loop self-terminates the
+  // moment the run reaches a terminal phase, without needing to re-create
+  // the interval on every state change.
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+
+  // ── A. Realtime auth refresh on token rotation ─────────────────
+  // The default `createBrowserClient` from @supabase/ssr restores the user's
+  // session from cookies asynchronously. The Realtime WebSocket, however, is
+  // initialized synchronously — if we subscribe before auth is propagated,
+  // every broadcast is dropped silently under the RLS SELECT policy. Same
+  // failure mode kicks in mid-session if the JWT expires and refreshes.
+  // Pushing the token to `realtime.setAuth` on both initial mount and every
+  // subsequent token rotation keeps broadcasts flowing.
+  useEffect(() => {
+    if (!isSupabaseConfiguredClient()) return;
+    const sb = getBrowserSupabase();
+    let cancelled = false;
+    // Prime on mount with whatever session is already loaded.
+    sb.auth.getSession().then(({ data: { session } }) => {
+      if (!cancelled && session?.access_token) {
+        sb.realtime.setAuth(session.access_token);
+      }
+    });
+    // Refresh on every rotation. SIGNED_IN covers the first-paint case where
+    // cookies hadn't propagated yet; TOKEN_REFRESHED covers long-lived pages.
+    const { data: { subscription } } = sb.auth.onAuthStateChange((event, session) => {
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session?.access_token) {
+        sb.realtime.setAuth(session.access_token);
+      }
+    });
+    return () => { cancelled = true; subscription.unsubscribe(); };
+  }, []);
+
   // ──────────────────────────────────────────────────────────────
   // Event reducer
   // ──────────────────────────────────────────────────────────────
   const applyEvent = useCallback((row: RunEventRow) => {
     if (row.id !== undefined && seqSeen.current.has(row.id)) return;
-    if (row.id !== undefined) seqSeen.current.add(row.id);
+    if (row.id !== undefined) {
+      seqSeen.current.add(row.id);
+      // Track the high-water mark so the polling backup can fetch only deltas.
+      if (row.id > maxSeqRef.current) maxSeqRef.current = row.id;
+    }
     const p = row.payload || {};
     const now = Date.now();
     // Terminal events use the row's wall-clock timestamp (so resuming an old
@@ -241,45 +285,112 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
   }, []);
 
   // ──────────────────────────────────────────────────────────────
-  // Realtime subscription + backfill
+  // Realtime subscription + polling backup (live updates without stalls)
+  //
+  // Layered strategy:
+  //   A. Prime Realtime auth with the user's JWT BEFORE subscribing, so RLS
+  //      doesn't silently filter every broadcast away.
+  //   B. Subscribe to the channel FIRST. Only after the channel reports
+  //      SUBSCRIBED do we run the backfill — closing the race window where
+  //      events emitted between an early SELECT and a late channel-join
+  //      would otherwise be lost.
+  //   C. Run a 2.5s polling backup INDEPENDENT of Realtime health. Even if
+  //      the WebSocket drops, expires, or the channel never delivers a
+  //      single broadcast, the UI catches up within 2.5s. Dedup in
+  //      applyEvent guarantees no double-application across the two paths.
+  //
+  // Polling stops the moment phaseRef reaches a terminal state (COMPLETE /
+  // ERRORED). The cleanup tears down both the channel and the poller.
   // ──────────────────────────────────────────────────────────────
   const subscribe = useCallback(
     (id: string) => {
       if (!isSupabaseConfiguredClient()) return;
       const sb = getBrowserSupabase();
 
-      sb.from('run_events')
-        .select('id,type,payload,created_at')
-        .eq('run_id', id)
-        .order('id', { ascending: true })
-        .then(({ data }) => {
+      let cancelled = false;
+      let pollInterval: ReturnType<typeof setInterval> | null = null;
+      let channel: ReturnType<typeof sb.channel> | null = null;
+
+      // Reset the per-run high-water mark BEFORE any fetch fires so polling
+      // can't accidentally skip rows from a previous run.
+      maxSeqRef.current = -1;
+
+      // Shared catch-up routine — used by both the backfill (`since = -1`)
+      // and every poll tick (`since = maxSeqRef.current`). The dedup in
+      // applyEvent makes overlap between Realtime + polling harmless.
+      const catchUp = async () => {
+        try {
+          const since = maxSeqRef.current;
+          const { data } = await sb
+            .from('run_events')
+            .select('id,type,payload,created_at')
+            .eq('run_id', id)
+            .gt('id', since)
+            .order('id', { ascending: true });
+          if (cancelled) return;
           const rows = (data ?? []) as RunEventRow[];
           rows.forEach((r) => applyEvent(r));
-          // Legacy-run fallback: runs that completed BEFORE the run_complete
-          // emit was deployed have an `answer` event but no terminal event.
-          // If we backfilled an answer and no run_complete/run_error followed,
-          // collapse to a completed state so the UI doesn't stay "RUNNING…".
-          const hasAnswer = rows.some((r) => r.type === 'answer');
-          const hasTerminal = rows.some((r) => r.type === 'run_complete' || r.type === 'run_error');
-          if (hasAnswer && !hasTerminal) {
-            const lastTs = rows[rows.length - 1]?.created_at;
-            setPhase('COMPLETE');
-            setRunning(false);
-            setCompletedAt(lastTs ? new Date(lastTs).getTime() : Date.now());
-            // totals stay null — the legacy run didn't ship cost data
+          // Legacy-run fallback: runs completed BEFORE the run_complete signal
+          // was deployed have an `answer` row but no terminal row. Collapse to
+          // COMPLETE so the UI doesn't stay stuck at "RUNNING…".
+          if (since === -1) {
+            const hasAnswer = rows.some((r) => r.type === 'answer');
+            const hasTerminal = rows.some((r) => r.type === 'run_complete' || r.type === 'run_error');
+            if (hasAnswer && !hasTerminal) {
+              const lastTs = rows[rows.length - 1]?.created_at;
+              setPhase('COMPLETE');
+              setRunning(false);
+              setCompletedAt(lastTs ? new Date(lastTs).getTime() : Date.now());
+            }
           }
-        });
+        } catch { /* best-effort — Realtime or the next poll will catch up */ }
+      };
 
-      const channel = sb
-        .channel(`run-${id}`)
-        .on(
-          'postgres_changes',
-          { event: 'INSERT', schema: 'public', table: 'run_events', filter: `run_id=eq.${id}` },
-          (payload) => applyEvent(payload.new as RunEventRow)
-        )
-        .subscribe();
+      // C. Polling backup — one immediate catch-up so the UI lights up the
+      //    moment the component mounts (even if Realtime never subscribes),
+      //    then every 2.5s as a safety net. Self-cancels on terminal phase.
+      void catchUp();
+      pollInterval = setInterval(() => {
+        if (cancelled) return;
+        const ph = phaseRef.current;
+        if (ph === 'COMPLETE' || ph === 'ERRORED') {
+          if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+          return;
+        }
+        void catchUp();
+      }, 2500);
 
-      const cleanup = () => sb.removeChannel(channel);
+      // A + B. Auth first, then channel, then on-SUBSCRIBED backfill.
+      (async () => {
+        try {
+          const { data: { session } } = await sb.auth.getSession();
+          if (session?.access_token) {
+            sb.realtime.setAuth(session.access_token);
+          }
+        } catch { /* polling will carry the run if auth fails */ }
+
+        if (cancelled) return;
+
+        channel = sb
+          .channel(`run-${id}`)
+          .on(
+            'postgres_changes',
+            { event: 'INSERT', schema: 'public', table: 'run_events', filter: `run_id=eq.${id}` },
+            (payload) => applyEvent(payload.new as RunEventRow)
+          )
+          .subscribe((status) => {
+            // Backfill ONLY after the channel is live, so we don't miss
+            // events inserted between the SELECT snapshot and channel-join.
+            // Polling already covers us until this fires.
+            if (status === 'SUBSCRIBED' && !cancelled) void catchUp();
+          });
+      })();
+
+      const cleanup = () => {
+        cancelled = true;
+        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        if (channel) sb.removeChannel(channel);
+      };
       cleanupRef.current = cleanup;
       return cleanup;
     },
@@ -317,6 +428,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
     setElapsedMs(0);
     seqSeen.current = new Set();
     doneCounter.current = 0;
+    maxSeqRef.current = -1;
   };
 
   const startFresh = () => {

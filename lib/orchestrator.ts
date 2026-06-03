@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { AGENTS } from './agents';
 import { loadCanonFor, loadFounderManifest } from './canon-loader';
 import { RUBRICS, RUBRIC_DESCRIPTIONS } from './trainer/rubrics';
+import { AGENT_MAX_TOKENS } from './library/cfo';
 import { Artifacts, PersonaMode, RunEvent, PIPELINE_ORDER, SCORED_AGENTS } from './types';
 
 // MD-08: fail fast on missing API key rather than deep inside a streaming response.
@@ -141,7 +142,7 @@ export async function* runTeam(
       const stream = client.messages.stream(
         {
           model: 'claude-sonnet-4-5',
-          max_tokens: 2048,
+          max_tokens: AGENT_MAX_TOKENS,
           system: systemPrompt,
           messages: [{ role: 'user', content: buildContext(role, problem, artifacts, trainerHistory) }],
         },

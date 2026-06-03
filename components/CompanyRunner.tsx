@@ -55,6 +55,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
   const [criticBody, setCriticBody] = useState('');
   const [synBody, setSynBody] = useState('');
   const [answer, setAnswer] = useState('');
+  const [trainerBody, setTrainerBody] = useState('');
   const [trainerDone, setTrainerDone] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
@@ -180,8 +181,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
         const delta = String(p.delta ?? '');
         if (id === 'critic') setCriticBody((b) => b + delta);
         else if (id === 'synthesizer') setSynBody((b) => b + delta);
-        // Trainer deltas are intentionally ignored in the UI per spec
-        // (we only flip the "TRAINER COMPLETE" pill once trainer_done fires).
+        else if (id === 'trainer') setTrainerBody((b) => b + delta);
         break;
       }
 
@@ -214,6 +214,9 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
         // do not change phase — answer is up, trainer runs in background
         break;
       case 'trainer_done':
+        // The artifact is the authoritative, complete report — prefer it over the
+        // accumulated deltas (and it's the only source in the buffered fallback path).
+        if (p.artifact) setTrainerBody(String(p.artifact));
         setTrainerDone(true);
         break;
       case 'run_complete':
@@ -306,6 +309,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
     setCriticBody('');
     setSynBody('');
     setAnswer('');
+    setTrainerBody('');
     setTrainerDone(false);
     setRunStartedAt(null);
     setCompletedAt(null);
@@ -356,6 +360,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
       cfoNote={cfoNote}
       criticBody={criticBody}
       synBody={synBody}
+      trainerBody={trainerBody}
       trainerDone={trainerDone}
       running={running}
       errorMsg={errorMsg}

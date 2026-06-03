@@ -10,7 +10,7 @@ import { LIBRARY, Specialist } from '../library/specialists';
 import {
   chiefOfStaffSystemPrompt, parseTeamPlan, computeExecutionLayers, PlannedAgent, TeamPlan,
 } from '../library/chief-of-staff';
-import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD } from '../library/cfo';
+import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD, SYNTH_MAX_TOKENS, TRAINER_MAX_TOKENS, AGENT_MAX_TOKENS, CRITIC_MAX_TOKENS } from '../library/cfo';
 import { applySpawner } from '../library/spawner';
 import { criticSystemPrompt, buildCriticContext } from '../library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from '../library/synthesizer';
@@ -156,7 +156,7 @@ export async function runLayerImpl(
     // LO-06: one agent's failure must not reject the whole layer — isolate it.
     try {
       const stream = client.messages.stream({
-        model, max_tokens: 2048,
+        model, max_tokens: AGENT_MAX_TOKENS,
         system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByAgent[agent.id] ?? [])),
         messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
         ...(agent.needsLiveData || effectFor(bundle, agent.id).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -196,7 +196,7 @@ export async function criticImpl(runId: string, problem: string, outputs: Record
   const criticEffect = effectFor(bundle, 'critic');
   let critique = ''; let inTok = 0; let outTok = 0;
   const stream = client.messages.stream({
-    model: 'claude-sonnet-4-5', max_tokens: 1024,
+    model: 'claude-sonnet-4-5', max_tokens: CRITIC_MAX_TOKENS,
     system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + criticEffect.systemPromptAddition),
     messages: [{ role: 'user', content: buildCriticContext(problem, team) }],
     ...(criticEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -222,7 +222,7 @@ export async function synthesizeImpl(runId: string, problem: string, outputs: Re
   const synthEffect = effectFor(bundle, 'synthesizer');
   let answer = ''; let inTok = 0; let outTok = 0;
   const stream = client.messages.stream({
-    model: SYNTHESIZER_MODEL, max_tokens: 2048,
+    model: SYNTHESIZER_MODEL, max_tokens: SYNTH_MAX_TOKENS,
     system: cachedSystem(synthesizerSystemPrompt(isRegulated) + loadFounderManifest() + synthEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
     ...(synthEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -259,7 +259,7 @@ export async function trainerImpl(
   const trainerEffect = effectFor(bundle, 'trainer');
   let report = ''; let inTok = 0; let outTok = 0;
   const stream = client.messages.stream({
-    model: TRAINER_MODEL, max_tokens: 2048,
+    model: TRAINER_MODEL, max_tokens: TRAINER_MAX_TOKENS,
     system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt() + trainerEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
     ...(trainerEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),

@@ -9,6 +9,11 @@
 import { getAdminSupabase } from './supabase-admin';
 import { getServerSupabase, isSupabaseConfigured } from './supabase-server';
 import { DistilledOverlay } from '@/lib/library/distiller';
+import { selectPinPromotions, PIN_PROMOTION_THRESHOLD } from '@/lib/trainer/learning';
+
+// Re-exported so existing importers keep working; the logic now lives in the
+// pure, DB-free lib/trainer/learning.ts so it can be unit-tested in isolation.
+export { selectPinPromotions, PIN_PROMOTION_THRESHOLD };
 
 export interface OverlayRow {
   id: number;
@@ -108,11 +113,9 @@ export async function insertOverlays(
 
 /**
  * Pin-promotion pass: any (user, agent, category, classification) tuple whose
- * unpinned overlays appear ≥ 3 times in the last 10 same-classification runs
- * gets promoted (pinned = true). Run after every insert.
- *
- * Promotes ONLY the most-recent matching overlay for the tuple — older
- * duplicates stay unpinned so the /training panel can still show provenance.
+ * unpinned overlays recur ≥ PIN_PROMOTION_THRESHOLD times gets promoted
+ * (pinned = true). Run after every insert. The promotion decision itself lives
+ * in the pure `selectPinPromotions` so it can be tested without a database.
  */
 export async function promotePinsForUser(
   userId: string,
@@ -132,16 +135,9 @@ export async function promotePinsForUser(
     .limit(200); // cap scan window
   if (!data || data.length === 0) return 0;
 
-  // Count by (agent, category). When count ≥ 3, the most recent one gets pinned.
-  const buckets = new Map<string, { firstId: number; count: number }>();
-  for (const r of data as Array<{ id: number; agent_id: string; category: string }>) {
-    const key = `${r.agent_id}|${r.category}`;
-    const cur = buckets.get(key);
-    if (!cur) buckets.set(key, { firstId: r.id, count: 1 });
-    else cur.count += 1;
-  }
-
-  const idsToPromote = [...buckets.values()].filter((b) => b.count >= 3).map((b) => b.firstId);
+  const idsToPromote = selectPinPromotions(
+    data as Array<{ id: number; agent_id: string; category: string }>,
+  );
   if (idsToPromote.length === 0) return 0;
 
   const { error } = await sb

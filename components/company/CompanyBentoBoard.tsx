@@ -51,6 +51,7 @@ interface Props {
   cfoNote: string;
   criticBody: string;
   synBody: string;
+  trainerBody: string;
   trainerDone: boolean;
   // run-level signals
   running: boolean;
@@ -127,7 +128,7 @@ function modelTag(model: string): string {
 // ──────────────────────────────────────────────────────────────────
 export default function CompanyBentoBoard({
   agents, order,
-  phase, cfoNote, criticBody, synBody, trainerDone,
+  phase, cfoNote, criticBody, synBody, trainerBody, trainerDone,
   running, errorMsg, answer,
   jobId, runStartedAt, completedAt, elapsedMs, totals,
   problem, setProblem, onSubmit, onNewRun,
@@ -383,6 +384,54 @@ export default function CompanyBentoBoard({
                   <div className="agent-prose">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
                   </div>
+
+                  {/* TRAINER REPORT — streams live while scoring, stays readable
+                      when done. Previously this was dropped and only a pill showed,
+                      so the report felt "stuck at fetching". */}
+                  {(trainerBody || !trainerDone) && (
+                    <details
+                      open={!trainerDone}
+                      style={{
+                        marginTop: 16,
+                        border: '1px solid rgba(236,72,153,0.3)',
+                        borderRadius: 8,
+                        background: 'rgba(236,72,153,0.05)',
+                      }}
+                    >
+                      <summary
+                        style={{
+                          cursor: 'pointer', listStyle: 'none',
+                          padding: '9px 12px',
+                          fontSize: '0.5rem', fontWeight: 700, letterSpacing: '0.14em',
+                          color: '#ec4899', textTransform: 'uppercase',
+                          display: 'flex', alignItems: 'center', gap: 8,
+                        }}
+                      >
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ec4899' }} />
+                        ⬡ Trainer Report
+                        <span style={{ color: 'var(--text-dim)', fontWeight: 600, letterSpacing: '0.1em' }}>
+                          {trainerDone ? '· COMPLETE' : '· SCORING…'}
+                        </span>
+                      </summary>
+                      <div
+                        style={{
+                          maxHeight: 280, overflow: 'auto',
+                          padding: '4px 14px 14px',
+                          borderTop: '1px solid rgba(236,72,153,0.18)',
+                        }}
+                      >
+                        {trainerBody ? (
+                          <div className="agent-prose" style={{ fontSize: '0.62rem', lineHeight: 1.7 }}>
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{trainerBody}</ReactMarkdown>
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.6rem', color: 'var(--text-dim)', letterSpacing: '0.08em', padding: '6px 0' }}>
+                            scoring every agent on evidence · relevance · reasoning · calibration · actionability…
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )}
                 </div>
                 <div className="ansfoot">
                   {totals?.agents ? <span>{totals.agents} agents</span> : null}

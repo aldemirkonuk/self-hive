@@ -45,11 +45,15 @@ export function buildDynamicTrainerContext(
   agentOutputs: { id: string; title: string; taskContract: string; content: string }[],
   answer: string
 ): string {
+  // Give the trainer a generous view of each agent's actual work. Outputs are
+  // now much longer (agents run up to AGENT_MAX_TOKENS), so a tight 2500-char
+  // window would make the trainer score on a sliver of the output. These caps
+  // exist only to bound the trainer's own context, not to hide work from it.
   const blocks = agentOutputs
     .map(
       (o) =>
-        `=== ${o.title} (id: ${o.id}) ===\nTASK CONTRACT: ${o.taskContract}\nOUTPUT:\n${o.content.slice(0, 2500)}`
+        `=== ${o.title} (id: ${o.id}) ===\nTASK CONTRACT: ${o.taskContract}\nOUTPUT:\n${o.content.slice(0, 12000)}`
     )
     .join('\n\n');
-  return `The problem:\n<user_problem>\n${problem}\n</user_problem>\n\nThe team's work:\n\n${blocks}\n\n=== FINAL SYNTHESIZED ANSWER ===\n${answer.slice(0, 1500)}\n\nScore every agent now.`;
+  return `The problem:\n<user_problem>\n${problem}\n</user_problem>\n\nThe team's work:\n\n${blocks}\n\n=== FINAL SYNTHESIZED ANSWER ===\n${answer.slice(0, 8000)}\n\nScore every agent now.`;
 }

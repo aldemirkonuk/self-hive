@@ -62,3 +62,18 @@ export function governBudget(plan: TeamPlan, cost?: CostContext): CFODecision {
 export const SYNTHESIZER_MODEL: ModelTier = 'claude-sonnet-4-5';
 export const TRAINER_MODEL: ModelTier = 'claude-sonnet-4-5';
 export const DEFAULT_COST_CEILING_USD = 0.75;
+
+// Output-token ceilings. The Anthropic API REQUIRES a max_tokens value — there
+// is no "unlimited" setting; the real ceiling is the model's max output. For
+// Claude Sonnet 4.5, the standard max is 8192 tokens (no beta header needed).
+// We set these AT the documented ceiling so the final ANSWER and the REPORT
+// never truncate. Billing is per token ACTUALLY produced — a high cap costs
+// nothing extra on short outputs; it just removes the artificial floor.
+//
+// To unlock 64K output, add the `anthropic-beta: output-128k-2025-02-19` header
+// to the Anthropic client init in step-impl.ts and bump the values below. We
+// intentionally stay at the standard ceiling here so behavior is portable.
+export const SYNTH_MAX_TOKENS = 8192; // final deliverable — the answer the founder reads
+export const TRAINER_MAX_TOKENS = 8192; // full per-agent scoring + verdict + calibration watch
+export const AGENT_MAX_TOKENS = 8192; // each specialist's full output
+export const CRITIC_MAX_TOKENS = 8192; // red-team challenge — bumped from 4096 so multi-risk critiques fit

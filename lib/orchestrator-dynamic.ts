@@ -6,7 +6,7 @@ import {
   computeExecutionLayers,
   PlannedAgent,
 } from './library/chief-of-staff';
-import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD } from './library/cfo';
+import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD, SYNTH_MAX_TOKENS, TRAINER_MAX_TOKENS, AGENT_MAX_TOKENS, CRITIC_MAX_TOKENS } from './library/cfo';
 import { applySpawner } from './library/spawner';
 import { criticSystemPrompt, buildCriticContext } from './library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from './library/synthesizer';
@@ -111,7 +111,7 @@ async function* streamAgent(
   const stream = client.messages.stream(
     {
       model,
-      max_tokens: 2048,
+      max_tokens: AGENT_MAX_TOKENS,
       system: cachedSystem(systemPrompt),
       messages: [{ role: 'user', content: userContent }],
       ...(useWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -268,7 +268,7 @@ export async function* runDynamicTeam(
     const cstream = client.messages.stream(
       {
         model: 'claude-sonnet-4-5',
-        max_tokens: 1024,
+        max_tokens: CRITIC_MAX_TOKENS,
         system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + criticEffect.systemPromptAddition),
         messages: [{ role: 'user', content: buildCriticContext(problem, teamOutputs) }],
         ...(criticEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -304,7 +304,7 @@ export async function* runDynamicTeam(
     const stream = client.messages.stream(
       {
         model: SYNTHESIZER_MODEL,
-        max_tokens: 2048,
+        max_tokens: SYNTH_MAX_TOKENS,
         system: cachedSystem(synthesizerSystemPrompt(plan.isRegulatedFinance) + loadFounderManifest() + synthEffect.systemPromptAddition),
         messages: [{ role: 'user', content: synthContext }],
         ...(synthEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -362,7 +362,7 @@ export async function* runDynamicTeam(
     const tstream = client.messages.stream(
       {
         model: TRAINER_MODEL,
-        max_tokens: 2048,
+        max_tokens: TRAINER_MAX_TOKENS,
         system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt() + trainerEffect.systemPromptAddition),
         messages: [{ role: 'user', content: trainerCtx }],
         ...(trainerEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -32,24 +32,31 @@ export default function TrainerReportButton({ runId, hasReport, problem }: Props
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
 
-  // Fetch lazily — only when the drawer is opened.
+  // Fetch lazily — once per (open, runId). Gated by a ref instead of dep-array
+  // membership so a 404 / error response doesn't re-trigger the effect into an
+  // infinite fetch loop (which was the cause of "FETCHING…" never resolving).
+  const fetchedForRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!open || report || loading) return;
+    if (!open) { fetchedForRef.current = null; return; }
+    if (fetchedForRef.current === runId) return;
+    fetchedForRef.current = runId;
     let cancelled = false;
     setLoading(true);
     setErr('');
+    setReport(null);
     fetch(`/api/trainer-report/${runId}`)
       .then(async (r) => {
         if (cancelled) return;
         if (r.status === 404) { setErr('No trainer report saved for this run.'); return; }
-        if (!r.ok) { setErr('Could not load report.'); return; }
+        if (r.status === 401) { setErr('Sign in to view this report.'); return; }
+        if (!r.ok) { setErr(`Could not load report (HTTP ${r.status}).`); return; }
         const j = (await r.json()) as TrainerReport;
         setReport(j);
       })
-      .catch(() => { if (!cancelled) setErr('Could not load report.'); })
+      .catch((e) => { if (!cancelled) setErr(`Could not load report: ${e instanceof Error ? e.message : 'network error'}`); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [open, report, loading, runId]);
+  }, [open, runId]);
 
   // ESC closes the drawer.
   useEffect(() => {

@@ -1,0 +1,47 @@
+name: Autonomous cycle (12h)
+
+# The SELFHIVE autonomous CEO loop. Vercel Hobby cron only fires once/day, so the
+# 12-hour cadence is driven from GitHub Actions instead. Fires at 01:00 and 13:00
+# UTC — a uniform 12h apart — and can be run on demand via the Actions tab.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   • Secret   CRON_SECRET         — must equal the CRON_SECRET in your Vercel env
+#   • Variable SELFHIVE_PROD_URL   — your production origin, e.g. https://selfhive.vercel.app
+
+on:
+  schedule:
+    - cron: '0 1,13 * * *'
+  workflow_dispatch:
+
+# Never let two cycles overlap if one runs long.
+concurrency:
+  group: autonomous-cycle
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger autonomous cycle
+        env:
+          PROD_URL: ${{ vars.SELFHIVE_PROD_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$PROD_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::error::Missing SELFHIVE_PROD_URL (repo variable) or CRON_SECRET (repo secret). See workflow header."
+            exit 1
+          fi
+          echo "Triggering autonomous cycle at $(date -u '+%Y-%m-%d %H:%M:%S UTC')…"
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' \
+            -X POST "${PROD_URL%/}/api/cron/autonomous" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            --max-time 300)
+          echo "HTTP $code"
+          echo "Response:"; cat /tmp/resp.json 2>/dev/null || true; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Autonomous cycle failed (HTTP $code)"
+            exit 1
+          fi
+          echo "✓ Autonomous cycle triggered."

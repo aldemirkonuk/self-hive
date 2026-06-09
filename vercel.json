@@ -1,8 +1,4 @@
 {
-  "crons": [
-    {
-      "path": "/api/cron/autonomous",
-      "schedule": "0 13 * * *"
-    }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": []
 }

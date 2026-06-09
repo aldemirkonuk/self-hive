@@ -23,6 +23,7 @@ import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { AgentRole } from '../types';
 import { ResourceBundle, effectFor } from '../resources/runtime';
 import { parseDynamicTrainerScores } from '../trainer/parse';
+import { recordSpawnedWorkforce } from '../workforce';
 import { extractPredictions } from '../markets/predictions';
 import { recordAndAllocate } from '../markets/portfolio';
 import { isMarketsRun } from '../markets/util';
@@ -343,11 +344,38 @@ export async function finalizeImpl(
     } catch { /* non-fatal */ }
   }
 
+  // Parse once — both the trainer-report row and the self-staffing loop need it.
+  const trainerScores = trainerReport ? parseDynamicTrainerScores(trainerReport) : {};
+
   if (trainerReport) {
     try {
-      const scores = parseDynamicTrainerScores(trainerReport);
-      await sb.from('trainer_reports').insert({ run_id: runId, raw_text: trainerReport, scores, patterns: {}, one_thing_company: '' });
+      await sb.from('trainer_reports').insert({ run_id: runId, raw_text: trainerReport, scores: trainerScores, patterns: {}, one_thing_company: '' });
     } catch { /* non-fatal */ }
+  }
+
+  // SELF-STAFFING LOOP: every spawned agent is logged to the spawn_ledger, the
+  // Registrar resolves it to a latent specialist, and any specialist that has
+  // proven itself (more than once, hard-genius average, no disasters) is
+  // auto-promoted into custom_agents — permanent staff. Drifters get retired.
+  if (userId && answer) {
+    try {
+      const spawnedAgents = plan.agents
+        .filter((a) => a.source === 'spawn')
+        .map((a) => ({
+          id: a.id,
+          title: a.title,
+          systemPrompt: a.systemPrompt ?? '',
+          taskContract: a.taskContract,
+          successCriteria: a.successCriteria,
+          needsLiveData: a.needsLiveData,
+        }));
+      const outcome = await recordSpawnedWorkforce({
+        userId, runId, classification: plan.classification, spawnedAgents, scores: trainerScores,
+      });
+      if (outcome.promoted.length || outcome.retired.length) {
+        await emit('workforce_update', { promoted: outcome.promoted, retired: outcome.retired });
+      }
+    } catch { /* non-fatal — bookkeeping must never break a run */ }
   }
 
   if (isMarketsRun(plan.classification, plan.isRegulatedFinance) && userId && answer) {

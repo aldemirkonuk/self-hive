@@ -2,149 +2,190 @@ import Nav from '@/components/Nav';
 import CreateAgentForm from '@/components/CreateAgentForm';
 import { FOUNDATIONAL_ROSTER } from '@/lib/roster';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
+import { getClusters, bucketClusters } from '@/lib/workforce/read';
+import { WORKFORCE, PROMOTED_COLOR } from '@/lib/workforce/constants';
 
 export const dynamic = 'force-dynamic';
 
-const TIER_LABEL: Record<string, string> = {
-  governance: 'GOVERNANCE',
-  leadership: 'LEADERSHIP',
-  execution: 'EXECUTION',
+type Klass = 'FOUNDATIONAL' | 'PROMOTED' | 'FOUNDER' | 'BENCH' | 'RETIRED';
+
+interface Row {
+  key: string;
+  title: string;
+  color: string;
+  klass: Klass;
+  domain: string;
+  detail: string;
+  appearances: number | null;
+  rolling: number | null;
+  note: string;
+}
+
+const KLASS_META: Record<Klass, { label: string; color: string }> = {
+  FOUNDATIONAL: { label: 'FOUNDATIONAL', color: '#f59e0b' },
+  PROMOTED: { label: 'PROMOTED', color: PROMOTED_COLOR },
+  FOUNDER: { label: 'FOUNDER', color: '#a855f7' },
+  BENCH: { label: 'ON THE BENCH', color: '#64748b' },
+  RETIRED: { label: 'RETIRED', color: '#475569' },
 };
 
-interface AgentStat {
-  lifetime_credits: number;
-  current_tier: string;
+const TIER_DOMAIN: Record<string, string> = { governance: 'governance', leadership: 'leadership', execution: 'execution' };
+
+function num(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export default async function TeamPage() {
-  // Pull lifetime stats per agent (treasury) + any promoted specialists.
-  const stats: Record<string, AgentStat> = {};
-  const promoted: { agent_role: string; lifetime_credits: number; current_tier: string }[] = [];
-  let customAgents: { agent_key: string; title: string; domain: string; mandate: string; color: string }[] = [];
+  const rows: Row[] = [];
   let signedIn = false;
+  let benchCount = 0;
+  let promotedCount = 0;
+
+  // ── Foundational roster — always present, no track record (they're permanent
+  //    by construction, not by promotion). ──
+  for (const a of FOUNDATIONAL_ROSTER) {
+    rows.push({
+      key: a.id, title: a.title, color: a.color, klass: 'FOUNDATIONAL',
+      domain: TIER_DOMAIN[a.tier] ?? a.tier, detail: a.mandate, appearances: null, rolling: null, note: '',
+    });
+  }
 
   if (isSupabaseConfigured()) {
     const sb = await getServerSupabase();
-    const { data } = await sb.auth.getUser();
-    if (data.user) {
+    const { data: auth } = await sb.auth.getUser();
+    if (auth.user) {
       signedIn = true;
-      const { data: treasury } = await sb
-        .from('treasury_state')
-        .select('agent_role, lifetime_credits, current_tier')
-        .eq('user_id', data.user.id);
-      (treasury ?? []).forEach((t) => {
-        stats[t.agent_role] = { lifetime_credits: t.lifetime_credits, current_tier: t.current_tier };
-        if (!FOUNDATIONAL_ROSTER.some((r) => r.id === t.agent_role)) promoted.push(t);
-      });
+
+      const clusters = await getClusters(auth.user.id);
+      const { promoted, bench, retired } = bucketClusters(clusters);
+      promotedCount = promoted.length;
+      benchCount = bench.length;
+      const promotedKeys = new Set(promoted.map((p) => p.promoted_agent_key).filter(Boolean) as string[]);
+
+      // Promoted specialists — graduated from the bench into permanent staff.
+      for (const c of promoted) {
+        rows.push({
+          key: c.id, title: c.canonical_title, color: PROMOTED_COLOR, klass: 'PROMOTED',
+          domain: c.canonical_domain, detail: c.role_summary,
+          appearances: c.appearances, rolling: num(c.rolling_score), note: 'graduated',
+        });
+      }
+
+      // Founder-created agents (anything in custom_agents NOT owned by a promoted
+      // cluster — works whether or not the `origin` column exists yet).
       const { data: custom } = await sb
         .from('custom_agents')
         .select('agent_key, title, domain, mandate, color')
-        .eq('user_id', data.user.id)
+        .eq('user_id', auth.user.id)
         .eq('active', true);
-      customAgents = custom ?? [];
+      for (const c of custom ?? []) {
+        if (promotedKeys.has(c.agent_key)) continue;
+        rows.push({
+          key: c.agent_key, title: c.title, color: c.color ?? '#a855f7', klass: 'FOUNDER',
+          domain: c.domain ?? 'general', detail: c.mandate ?? '', appearances: null, rolling: null, note: 'you made this',
+        });
+      }
+
+      // The bench — spawned specialists accruing a track record toward promotion.
+      for (const c of bench) {
+        const apps = c.appearances;
+        const roll = num(c.rolling_score);
+        const need = WORKFORCE.PROMOTE_MIN_APPEARANCES;
+        rows.push({
+          key: c.id, title: c.canonical_title, color: '#64748b', klass: 'BENCH',
+          domain: c.canonical_domain, detail: c.role_summary, appearances: apps, rolling: roll,
+          note: `${Math.min(apps, need)}/${need} appearances`,
+        });
+      }
+
+      // Retired — promoted, then drifted below the bar.
+      for (const c of retired) {
+        rows.push({
+          key: c.id, title: c.canonical_title, color: '#475569', klass: 'RETIRED',
+          domain: c.canonical_domain, detail: c.role_summary, appearances: c.appearances, rolling: num(c.rolling_score), note: 'let go',
+        });
+      }
     }
   }
-
-  const tiers: Array<'governance' | 'leadership' | 'execution'> = ['governance', 'leadership', 'execution'];
 
   return (
     <div className="relative min-h-screen flex flex-col" style={{ zIndex: 1 }}>
       <Nav />
       <main className="flex-1 p-6 overflow-auto">
         <div className="max-w-5xl mx-auto">
-          <div className="flex items-start justify-between mb-5">
+          <div className="flex items-start justify-between mb-3 gap-4 flex-wrap">
             <div>
-              <h1 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f59e0b', letterSpacing: '0.1em' }}>THE TEAM</h1>
-              <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: 2 }}>
-                The permanent roster. Specialists spawn per-problem and graduate here when they prove themselves.
+              <h1 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#f59e0b', letterSpacing: '0.1em' }}>THE WORKFORCE</h1>
+              <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: 2, maxWidth: '64ch', lineHeight: 1.5 }}>
+                The company staffs itself. Specialists spawn per problem, earn a track record, and graduate to permanent staff
+                only by clearing a hard bar: <strong style={{ color: 'var(--text-muted)' }}>≥{WORKFORCE.PROMOTE_MIN_APPEARANCES} appearances</strong>,{' '}
+                <strong style={{ color: 'var(--text-muted)' }}>≥{WORKFORCE.PROMOTE_MIN_ROLLING}/10 average</strong>, and{' '}
+                <strong style={{ color: 'var(--text-muted)' }}>no run below {WORKFORCE.PROMOTE_MIN_FLOOR}</strong>. Drift below {WORKFORCE.RETIRE_ROLLING_BELOW} and they&apos;re retired.
               </p>
             </div>
             {signedIn && <CreateAgentForm />}
           </div>
 
-          {tiers.map((tier) => (
-            <div key={tier} className="mb-6">
-              <div style={{ fontSize: '0.55rem', color: 'var(--text-dim)', letterSpacing: '0.14em', fontWeight: 700, marginBottom: 10 }}>
-                {TIER_LABEL[tier]}
-              </div>
-              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
-                {FOUNDATIONAL_ROSTER.filter((a) => a.tier === tier).map((a) => {
-                  const s = stats[a.id];
+          {signedIn && (
+            <div className="flex gap-2 mb-4" style={{ fontSize: '0.52rem', color: 'var(--text-dim)' }}>
+              <span style={{ color: PROMOTED_COLOR }}>{promotedCount} promoted</span>
+              <span>·</span>
+              <span style={{ color: '#94a3b8' }}>{benchCount} on the bench</span>
+            </div>
+          )}
+
+          <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.62rem' }}>
+              <thead>
+                <tr style={{ background: 'var(--bg-panel)', textAlign: 'left' }}>
+                  {['AGENT', 'CLASS', 'DOMAIN', 'APPEARANCES', 'SCORE', ''].map((h, i) => (
+                    <th key={h || i} style={{ padding: '8px 12px', fontSize: '0.5rem', letterSpacing: '0.12em', color: 'var(--text-dim)', fontWeight: 700, borderBottom: '1px solid var(--border)' }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const km = KLASS_META[r.klass];
+                  const dimmed = r.klass === 'RETIRED';
                   return (
-                    <div key={a.id} className="rounded-lg p-4" style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)' }}>
-                      <div className="flex items-center justify-between mb-2">
+                    <tr key={`${r.klass}-${r.key}`} style={{ borderBottom: '1px solid var(--border)', opacity: dimmed ? 0.55 : 1 }}>
+                      <td style={{ padding: '9px 12px' }}>
                         <div className="flex items-center gap-2">
-                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: a.color }} />
-                          <span style={{ fontSize: '0.7rem', fontWeight: 700, color: a.color, letterSpacing: '0.04em' }}>{a.title}</span>
+                          <span style={{ width: 7, height: 7, borderRadius: '50%', background: r.color, flexShrink: 0, textDecoration: dimmed ? 'line-through' : 'none' }} />
+                          <span style={{ fontWeight: 700, color: dimmed ? 'var(--text-dim)' : r.color }}>{r.title}</span>
                         </div>
-                        {s && (
-                          <span style={{ fontSize: '0.5rem', fontWeight: 700, letterSpacing: '0.06em', color: 'var(--gold)' }}>
-                            {s.current_tier}
+                        {r.detail && <div style={{ fontSize: '0.54rem', color: 'var(--text-dim)', marginTop: 3, maxWidth: '46ch', lineHeight: 1.4 }}>{r.detail}</div>}
+                      </td>
+                      <td style={{ padding: '9px 12px' }}>
+                        <span style={{ fontSize: '0.48rem', fontWeight: 700, letterSpacing: '0.08em', color: km.color }}>{km.label}</span>
+                      </td>
+                      <td style={{ padding: '9px 12px', color: 'var(--text-muted)' }}>{r.domain}</td>
+                      <td style={{ padding: '9px 12px', color: 'var(--text-muted)' }}>{r.appearances == null ? '—' : r.appearances}</td>
+                      <td style={{ padding: '9px 12px' }}>
+                        {r.rolling == null ? (
+                          <span style={{ color: 'var(--text-dim)' }}>—</span>
+                        ) : (
+                          <span style={{ fontWeight: 700, color: r.rolling >= WORKFORCE.PROMOTE_MIN_ROLLING ? '#22c55e' : r.rolling >= WORKFORCE.PROMOTE_MIN_FLOOR ? '#f59e0b' : '#ef4444' }}>
+                            {r.rolling.toFixed(1)}
                           </span>
                         )}
-                      </div>
-                      <p style={{ fontSize: '0.62rem', color: 'var(--text-muted)', lineHeight: 1.55 }}>{a.mandate}</p>
-                      {s && (
-                        <div style={{ fontSize: '0.52rem', color: 'var(--text-dim)', marginTop: 8 }}>
-                          {s.lifetime_credits.toLocaleString()} lifetime credits
-                        </div>
-                      )}
-                    </div>
+                      </td>
+                      <td style={{ padding: '9px 12px', fontSize: '0.52rem', color: 'var(--text-dim)' }}>{r.note}</td>
+                    </tr>
                   );
                 })}
-              </div>
-            </div>
-          ))}
-
-          {/* Founder-created custom agents */}
-          <div className="mb-6">
-            <div style={{ fontSize: '0.55rem', color: '#a855f7', letterSpacing: '0.14em', fontWeight: 700, marginBottom: 10 }}>
-              YOUR CUSTOM AGENTS <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>· the Chief of Staff deploys these when relevant</span>
-            </div>
-            {customAgents.length === 0 ? (
-              <div className="rounded-lg p-5 text-center" style={{ background: 'var(--bg-panel)', border: '1px dashed rgba(168,85,247,0.3)' }}>
-                <p style={{ fontSize: '0.62rem', color: 'var(--text-dim)' }}>
-                  None yet. Use “+ Create an Agent” above — you define it, the Chief of Staff decides when to use it.
-                </p>
-              </div>
-            ) : (
-              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))' }}>
-                {customAgents.map((c) => (
-                  <div key={c.agent_key} className="rounded-lg p-3" style={{ background: 'var(--bg-panel)', border: '1px solid rgba(168,85,247,0.25)' }}>
-                    <div className="flex items-center gap-2 mb-1">
-                      <div style={{ width: 7, height: 7, borderRadius: '50%', background: c.color }} />
-                      <span style={{ fontSize: '0.66rem', fontWeight: 700, color: c.color }}>{c.title}</span>
-                      <span style={{ fontSize: '0.48rem', color: 'var(--text-dim)' }}>{c.domain}</span>
-                    </div>
-                    <p style={{ fontSize: '0.58rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>{c.mandate}</p>
-                  </div>
-                ))}
-              </div>
-            )}
+              </tbody>
+            </table>
           </div>
 
-          {/* Promoted specialists */}
-          <div className="mb-6">
-            <div style={{ fontSize: '0.55rem', color: 'var(--text-dim)', letterSpacing: '0.14em', fontWeight: 700, marginBottom: 10 }}>
-              PROMOTED SPECIALISTS
-            </div>
-            {promoted.length === 0 ? (
-              <div className="rounded-lg p-5 text-center" style={{ background: 'var(--bg-panel)', border: '1px dashed var(--border)' }}>
-                <p style={{ fontSize: '0.62rem', color: 'var(--text-dim)' }}>
-                  No specialists promoted yet. Spawned agents that score &gt;0.82 across 5 appearances graduate here.
-                </p>
-              </div>
-            ) : (
-              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}>
-                {promoted.map((p) => (
-                  <div key={p.agent_role} className="rounded-lg p-3" style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '0.65rem', fontWeight: 700, color: 'var(--text-primary)' }}>{p.agent_role}</div>
-                    <div style={{ fontSize: '0.52rem', color: 'var(--gold)', marginTop: 4 }}>{p.current_tier} · {p.lifetime_credits.toLocaleString()} cr</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          {!signedIn && (
+            <p style={{ fontSize: '0.6rem', color: 'var(--text-dim)', marginTop: 12 }}>
+              Sign in to see your company&apos;s self-built workforce.
+            </p>
+          )}
         </div>
       </main>
     </div>

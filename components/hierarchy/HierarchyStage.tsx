@@ -15,10 +15,23 @@ interface CustomAgent {
   color: string;
 }
 
+// A specialist the hive promoted into permanent staff. Rendered as a dynamic
+// node on an outer arc — "graduated beyond the standing company".
+export interface PromotedNode {
+  key: string;
+  name: string;
+  color: string;
+  score: number | null;
+  summary: string;
+  appearances: number;
+  domain: string;
+}
+
 interface Props {
   // Live overall scores keyed by lowercased agent title.
   scores: Record<string, number>;
   customAgents: CustomAgent[];
+  promoted?: PromotedNode[];
 }
 
 const scoreClass = (s: number) => (s < 6 ? 'red' : s <= 7.5 ? 'amber' : 'green');
@@ -27,6 +40,26 @@ function scoreFor(n: HierNode, scores: Record<string, number>): number | null {
   if (!n.scoreTitle) return null;
   const v = scores[n.scoreTitle.toLowerCase()];
   return typeof v === 'number' ? v : null;
+}
+
+function initials(name: string): string {
+  return name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join('')
+    .slice(0, 3)
+    .toUpperCase();
+}
+
+// Promoted nodes sit on an outer arc across the lower sweep (avoids the Trainer
+// at 90° and Ethics Guardian at -90°).
+const PROMO_R = RINGS.parallel - 6;
+function promoPos(i: number, n: number): { x: number; y: number } {
+  const a0 = 104;
+  const a1 = 256;
+  const ang = n <= 1 ? 180 : a0 + (a1 - a0) * (i / (n - 1));
+  const rad = (ang * Math.PI) / 180;
+  return { x: CANVAS.cx + Math.cos(rad) * PROMO_R, y: CANVAS.cy + Math.sin(rad) * PROMO_R };
 }
 
 const TIER_RAIL: Array<{ n: string; lvl: string; keys: string[]; note?: string; parallel?: boolean }> = [
@@ -42,12 +75,34 @@ const TIER_RAIL: Array<{ n: string; lvl: string; keys: string[]; note?: string; 
   { n: 'PARALLEL', lvl: 'EVALUATOR', keys: ['trainer'], note: 'outside the chain · scores every agent each run', parallel: true },
 ];
 
-export default function HierarchyStage({ scores, customAgents }: Props) {
+export default function HierarchyStage({ scores, customAgents, promoted }: Props) {
   const [selected, setSelected] = useState<string>('founder');
+  const promo = promoted ?? [];
   const byKey = Object.fromEntries(HIER_NODES.map((n) => [n.key, n]));
-  const sel = byKey[selected] ?? byKey.founder;
+  const promoByKey = Object.fromEntries(promo.map((p) => [p.key, p]));
   const pos = Object.fromEntries(HIER_NODES.map((n) => [n.key, nodePos(n)]));
-  const selScore = scoreFor(sel, scores);
+
+  // Normalize the inspector target — a foundational node OR a promoted specialist.
+  const selPromo = promoByKey[selected];
+  const node = byKey[selected] ?? byKey.founder;
+  const inspect = selPromo
+    ? {
+        name: selPromo.name.toUpperCase(),
+        color: selPromo.color,
+        role: 'PROMOTED · PERMANENT STAFF',
+        mandate: selPromo.summary,
+        authority: `— graduated after proving itself across ${selPromo.appearances} runs; the Chief of Staff summons it when relevant.`,
+        reportsTo: 'Chief of Staff (when summoned). Permanent until it drifts.',
+      }
+    : {
+        name: node.name,
+        color: node.color,
+        role: node.role,
+        mandate: node.mandate,
+        authority: node.authority,
+        reportsTo: node.reportsTo,
+      };
+  const selScore = selPromo ? selPromo.score : scoreFor(node, scores);
 
   return (
     <>
@@ -76,6 +131,25 @@ export default function HierarchyStage({ scores, customAgents }: Props) {
                   strokeWidth={e.kind === 'dot' ? 1.1 : 1.5}
                   strokeDasharray={e.kind === 'dot' ? '2 5' : undefined}
                   opacity={active ? 1 : e.kind === 'dot' ? 0.5 : 0.7}
+                />
+              );
+            })}
+            {/* Promoted specialists hang off the Chief of Staff, like summoned company. */}
+            {promo.map((p, i) => {
+              const a = pos['chief_of_staff'];
+              const b = promoPos(i, promo.length);
+              const active = selected === p.key || selected === 'chief_of_staff';
+              return (
+                <line
+                  key={`pe-${p.key}`}
+                  x1={a.x.toFixed(2)}
+                  y1={a.y.toFixed(2)}
+                  x2={b.x.toFixed(2)}
+                  y2={b.y.toFixed(2)}
+                  stroke="var(--c-cto)"
+                  strokeWidth={1.1}
+                  strokeDasharray="2 5"
+                  opacity={active ? 1 : 0.4}
                 />
               );
             })}
@@ -126,6 +200,39 @@ export default function HierarchyStage({ scores, customAgents }: Props) {
               </div>
             );
           })}
+
+          {/* Living layer: promoted specialists as dynamic nodes. */}
+          {promo.map((p, i) => {
+            const pp = promoPos(i, promo.length);
+            const dimmed = selected !== p.key;
+            return (
+              <div
+                key={`pn-${p.key}`}
+                className={`hier-node company ${dimmed ? 'dimmed' : 'selected'}`}
+                style={
+                  {
+                    left: `${((pp.x / CANVAS.w) * 100).toFixed(3)}%`,
+                    top: `${((pp.y / CANVAS.h) * 100).toFixed(3)}%`,
+                    '--c': p.color,
+                  } as React.CSSProperties
+                }
+                onClick={() => setSelected(p.key)}
+                title={`${p.name} · promoted specialist`}
+              >
+                <div className="hier-hex">
+                  <span className="ini">{initials(p.name)}</span>
+                </div>
+                <span className="hier-cap">
+                  <span className="cdot" />
+                  {p.score != null ? (
+                    <span className={`sc ${scoreClass(p.score)}`}>{p.score.toFixed(1)}</span>
+                  ) : (
+                    p.name.split(' ')[0]
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -141,15 +248,33 @@ export default function HierarchyStage({ scores, customAgents }: Props) {
               </div>
               <div className="who">
                 {t.keys.map((k) => {
-                  const node = byKey[k];
-                  if (!node) return null;
+                  const n = byKey[k];
+                  if (!n) return null;
                   return (
                     <span key={k} className="m" onClick={() => setSelected(k)} style={{ cursor: 'pointer' }}>
-                      <span className="cdot" style={{ background: node.color }} />
-                      {node.name}
+                      <span className="cdot" style={{ background: n.color }} />
+                      {n.name}
                     </span>
                   );
                 })}
+                {t.lvl === 'COMPANY' &&
+                  promo.map((p) => (
+                    <span
+                      key={`r-${p.key}`}
+                      className="m"
+                      onClick={() => setSelected(p.key)}
+                      style={{ cursor: 'pointer' }}
+                      title="promoted specialist — permanent staff"
+                    >
+                      <span className="cdot" style={{ background: p.color }} />
+                      {p.name.toUpperCase()}
+                      {p.score != null && (
+                        <span className={`sc ${scoreClass(p.score)}`} style={{ marginLeft: 5 }}>
+                          {p.score.toFixed(1)}
+                        </span>
+                      )}
+                    </span>
+                  ))}
                 {t.lvl === 'COMPANY' &&
                   customAgents.map((c) => (
                     <span key={c.name} className="m" title="your custom agent">
@@ -164,9 +289,9 @@ export default function HierarchyStage({ scores, customAgents }: Props) {
         </div>
 
         <aside className="hier-panel">
-          <h3 style={{ color: sel.color }}>{sel.name}</h3>
-          <div className="pn-role" style={{ color: sel.color }}>
-            {sel.role}
+          <h3 style={{ color: inspect.color }}>{inspect.name}</h3>
+          <div className="pn-role" style={{ color: inspect.color }}>
+            {inspect.role}
             {selScore != null && (
               <span className={`sc ${scoreClass(selScore)}`} style={{ marginLeft: 8 }}>
                 · {selScore.toFixed(1)}/10
@@ -176,17 +301,17 @@ export default function HierarchyStage({ scores, customAgents }: Props) {
           <div className="kv">
             <div className="r">
               <span className="k">Mandate</span>
-              <span className="v">{sel.mandate}</span>
+              <span className="v">{inspect.mandate}</span>
             </div>
             <div className="r">
               <span className="k">Authority over</span>
-              <span className="v">{sel.authority}</span>
+              <span className="v">{inspect.authority}</span>
             </div>
           </div>
           <div className="reports kv">
             <div className="r">
               <span className="k">Reports to</span>
-              <span className="v">{sel.reportsTo}</span>
+              <span className="v">{inspect.reportsTo}</span>
             </div>
           </div>
           <div className="hint">click any node to inspect →</div>

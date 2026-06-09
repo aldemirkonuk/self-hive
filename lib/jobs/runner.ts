@@ -5,6 +5,7 @@ import { extractPredictions } from '../markets/predictions';
 import { recordAndAllocate } from '../markets/portfolio';
 import { isMarketsRun } from '../markets/util';
 import { getCustomAgents } from '../library/custom';
+import { recordSpawnedWorkforce, type SpawnedAgentInput } from '../workforce';
 import type { ResourceBundle } from '../resources/runtime';
 
 // Throttle interval for streaming-content snapshots (ms). Structural events
@@ -89,6 +90,9 @@ async function executeDynamicJobInner(
   let finalAnswer = '';
   let trainerReport = '';
   let status: 'completed' | 'failed' = 'completed';
+  // Spawned (source='spawn') agents this run — captured from the team_plan event,
+  // fed to the self-staffing loop after scoring.
+  let spawnedThisRun: SpawnedAgentInput[] = [];
 
   // Founder-created agents the Chief of Staff may choose to deploy
   const customAgents = userId ? await getCustomAgents(userId) : {};
@@ -136,9 +140,23 @@ async function executeDynamicJobInner(
         }
         case 'team_plan':
           if (ev.plan && typeof ev.plan === 'object') {
-            const pl = ev.plan as { classification?: string; isRegulatedFinance?: boolean };
+            const pl = ev.plan as {
+              classification?: string;
+              isRegulatedFinance?: boolean;
+              agents?: Array<{ id: string; title: string; source?: string; systemPrompt?: string; taskContract?: string; successCriteria?: string; needsLiveData?: boolean }>;
+            };
             classification = String(pl.classification ?? '');
             isMarkets = isMarketsRun(classification, Boolean(pl.isRegulatedFinance));
+            spawnedThisRun = (pl.agents ?? [])
+              .filter((a) => a.source === 'spawn')
+              .map((a) => ({
+                id: a.id,
+                title: a.title,
+                systemPrompt: a.systemPrompt ?? '',
+                taskContract: a.taskContract ?? '',
+                successCriteria: a.successCriteria ?? '',
+                needsLiveData: Boolean(a.needsLiveData),
+              }));
           }
           await writeEvent('team_plan', { plan: ev.plan });
           break;
@@ -184,17 +202,38 @@ async function executeDynamicJobInner(
     await writeEvent('run_error', { error: err instanceof Error ? err.message : 'job failed' });
   }
 
-  // Persist trainer scores for history + future pattern detection
+  // Persist trainer scores for history + future pattern detection. Parse once —
+  // the self-staffing loop below reuses the same scores.
+  const trainerScores = trainerReport ? parseDynamicTrainerScores(trainerReport) : {};
   if (trainerReport) {
     try {
-      const scores = parseDynamicTrainerScores(trainerReport);
       await sb.from('trainer_reports').insert({
         run_id: runId,
         raw_text: trainerReport,
-        scores,
+        scores: trainerScores,
         patterns: {},
         one_thing_company: '',
       });
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  // SELF-STAFFING LOOP (parity with the workflow path's finalizeImpl): persist
+  // spawned agents, cluster them via the Registrar, auto-promote proven geniuses
+  // into custom_agents and retire drifters. Best-effort — never breaks a run.
+  if (userId && status === 'completed') {
+    try {
+      const outcome = await recordSpawnedWorkforce({
+        userId,
+        runId,
+        classification,
+        spawnedAgents: spawnedThisRun,
+        scores: trainerScores,
+      });
+      if (outcome.promoted.length || outcome.retired.length) {
+        await writeEvent('workforce_update', { promoted: outcome.promoted, retired: outcome.retired });
+      }
     } catch {
       /* non-fatal */
     }

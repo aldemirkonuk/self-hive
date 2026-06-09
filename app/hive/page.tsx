@@ -1,6 +1,8 @@
 import Nav from '@/components/Nav';
-import HierarchyStage from '@/components/hierarchy/HierarchyStage';
+import HierarchyStage, { type PromotedNode } from '@/components/hierarchy/HierarchyStage';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
+import { getClusters, bucketClusters } from '@/lib/workforce/read';
+import { PROMOTED_COLOR } from '@/lib/workforce/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,6 +12,7 @@ export default async function HivePage() {
   // match them to nodes. No data → nodes render their name instead of a score.
   const scores: Record<string, number> = {};
   let customAgents: { name: string; color: string }[] = [];
+  let promoted: PromotedNode[] = [];
 
   if (isSupabaseConfigured()) {
     const sb = await getServerSupabase();
@@ -45,12 +48,35 @@ export default async function HivePage() {
         for (const [k, v] of Object.entries(acc)) scores[k] = v.sum / v.n;
       }
 
+      // Promoted specialists — the hive's self-built permanent staff. Prefer a
+      // live recent-run score; fall back to the cluster's lifetime rolling score.
+      const clusters = await getClusters(auth.user.id);
+      const { promoted: promotedClusters } = bucketClusters(clusters);
+      const promotedKeys = new Set(
+        promotedClusters.map((c) => c.promoted_agent_key).filter(Boolean) as string[]
+      );
+      promoted = promotedClusters.map((c) => {
+        const live = scores[c.canonical_title.toLowerCase()];
+        const sc = typeof live === 'number' ? live : Number(c.rolling_score);
+        return {
+          key: `promo_${c.id}`,
+          name: c.canonical_title,
+          color: PROMOTED_COLOR,
+          score: Number.isFinite(sc) && sc > 0 ? sc : null,
+          summary: c.role_summary,
+          appearances: c.appearances,
+          domain: c.canonical_domain,
+        };
+      });
+
       const { data: custom } = await sb
         .from('custom_agents')
-        .select('title, color')
+        .select('agent_key, title, color')
         .eq('user_id', auth.user.id)
         .eq('active', true);
-      customAgents = (custom ?? []).map((c) => ({ name: c.title, color: c.color }));
+      customAgents = (custom ?? [])
+        .filter((c) => !promotedKeys.has(c.agent_key))
+        .map((c) => ({ name: c.title, color: c.color }));
     }
   }
 
@@ -80,7 +106,7 @@ export default async function HivePage() {
             </div>
           </div>
 
-          <HierarchyStage scores={scores} customAgents={customAgents} />
+          <HierarchyStage scores={scores} customAgents={customAgents} promoted={promoted} />
         </div>
       </main>
     </div>

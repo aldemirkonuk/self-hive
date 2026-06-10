@@ -778,16 +778,21 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 .sh-chip.errored { color: #ef4444; border-color: rgba(239,68,68,0.4); }
 .sh-chip .spk { font-size: 8px; color: var(--sh-critic); margin-left: 2px; }
 
-/* ── the hive (bento) ── */
-.sh-stage { position: relative; flex: 1; min-height: 0; }
+/* ── the hive (bento) ──
+   Tiles are a FIXED size (--sh-tile per grid row), never `1fr`. With 1fr the
+   rows split the container height, so every new agent shrank all the others —
+   the "boxes keep changing size" problem. Fixed rows keep every tile identical;
+   when the roster outgrows the stage, the stage scrolls instead of squeezing. */
+.sh-stage { position: relative; flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
 .sh-links {
   position: absolute; inset: 0; width: 100%; height: 100%;
   z-index: 0; pointer-events: none; overflow: visible;
 }
 .sh-bento {
-  position: relative; z-index: 1; height: 100%;
-  display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 1fr;
-  gap: 11px; grid-auto-flow: dense; min-height: 460px;
+  position: relative; z-index: 1; min-height: 100%;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  grid-auto-rows: var(--sh-tile, 154px); align-content: start;
+  gap: 11px; grid-auto-flow: dense;
 }
 @media (max-width: 920px) {
   .sh-bento { grid-template-columns: repeat(2, 1fr); }
@@ -852,7 +857,7 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 }
 
 /* states */
-.sh-card.done { opacity: 0.66; }
+.sh-card.done { opacity: 0.82; }
 .sh-card.done .id { color: var(--text-muted); }
 .sh-card.queued { opacity: 0.5; }
 .sh-card.queued .dot { background: var(--text-dim); }
@@ -883,10 +888,27 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
               0 0 0 1px color-mix(in srgb, var(--ac) 30%, transparent) inset;
 }
 
-/* mini done strip card (header-only) */
-.sh-card.mini { grid-row: span 1; min-height: 56px; }
-.sh-card.mini .bd, .sh-card.mini .stream, .sh-card.mini .foot { display: none; }
-.sh-card.mini .hd { border-bottom: none; height: 100%; }
+/* clickable tile — has a response you can open in the detail drawer */
+.sh-card.clickable { cursor: pointer; }
+.sh-card.clickable:hover {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--ac) 55%, var(--border));
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px -12px color-mix(in srgb, var(--ac) 55%, transparent);
+}
+.sh-card.clickable:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ac) 60%, transparent);
+  outline-offset: 2px;
+}
+.sh-card.clickable .foot span:last-child { color: var(--ac); font-weight: 700; }
+
+/* tile body: clamped preview (done) + live "working…" hint — never grows the
+   tile; the full response opens on click. */
+.sh-card .bd .sh-preview {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal; word-break: break-word;
+}
+.sh-card .bd .sh-working-hint { color: var(--ac); letter-spacing: 0.04em; }
 
 /* idle placeholder hero */
 .sh-card.idlehero {

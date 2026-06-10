@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -92,11 +92,11 @@ const PHASE_NOTE: Record<PhaseId, string> = {
   IDLE: 'Hive dormant · awaiting a brief',
   COMPOSING: '<b>Chief of Staff</b> reads the brief · classifying · composing the roster',
   PROVISIONING: '<b>CFO</b> assigns model tiers · agents spawn into the run',
-  EXECUTING: 'Specialists working <b>in parallel</b>',
+  EXECUTING: 'Specialists working <b>in parallel</b> · click any finished agent to read its response',
   CRITIQUING: '<b>Critic</b> red-teaming the analysis',
   SYNTHESIZING: '<b>Synthesizer</b> converging into an answer',
-  DELIVERED: 'Answer delivered · <b>Trainer</b> scoring in the background',
-  COMPLETE: '<b>Run complete</b>',
+  DELIVERED: 'Answer delivered · <b>Trainer</b> scoring · click any agent to see how it responded',
+  COMPLETE: '<b>Run complete</b> · click any agent to review what & how it responded',
   ERRORED: '<b>Run failed</b>',
 };
 
@@ -136,12 +136,19 @@ export default function CompanyBentoBoard({
   const bentoRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
+  // Which agent's full response is open in the detail drawer (null = closed).
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const selected = selectedId ? agents[selectedId] : null;
+
   const isLive = running && phase !== 'IDLE' && phase !== 'COMPLETE' && phase !== 'ERRORED';
   const isDone = phase === 'COMPLETE';
   const isErr = phase === 'ERRORED';
   const liveLabel = isErr ? 'ERROR' : isDone ? 'DONE' : isLive ? 'LIVE' : 'IDLE';
 
-  // ── Hero selection: phase-anchored. No specialist is ever pre-positioned. ──
+  // ── Hero selection: phase-anchored only. During EXECUTING no specialist is
+  //    ever promoted to a 2×2 hero — that promotion (and its per-agent_start
+  //    churn) was what made the whole bento reflow every time an agent spawned.
+  //    Now specialists always render as uniform, fixed-size tiles. ──
   const heroKey: string = useMemo(() => {
     if (phase === 'IDLE') return '__idle';
     if (phase === 'COMPOSING') return '__meta_cos';
@@ -150,19 +157,8 @@ export default function CompanyBentoBoard({
     if (phase === 'SYNTHESIZING') return '__meta_syn';
     if (phase === 'DELIVERED' || phase === 'COMPLETE') return '__answer';
     if (phase === 'ERRORED') return '__error';
-    // EXECUTING: most recently started still-working specialist; fallback to last finished.
-    const working = order
-      .map((id) => agents[id])
-      .filter((a): a is BentoAgent => Boolean(a) && a.status === 'working')
-      .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
-    if (working[0]) return working[0].id;
-    const done = order
-      .map((id) => agents[id])
-      .filter((a): a is BentoAgent => Boolean(a) && a.status === 'done')
-      .sort((a, b) => (b.doneOrder ?? 0) - (a.doneOrder ?? 0));
-    if (done[0]) return done[0].id;
-    return '__meta_cfo';
-  }, [phase, agents, order]);
+    return '__none'; // EXECUTING — uniform tile grid, no jumping hero
+  }, [phase]);
 
   // ── Team chip strip: meta-stations (always) + dynamic specialists (after team_plan). ──
   type ChipState = 'dim' | 'on' | 'live' | 'done' | 'errored';
@@ -263,10 +259,31 @@ export default function CompanyBentoBoard({
   });
   useEffect(() => {
     const ro = new ResizeObserver(() => drawFlows());
-    if (bentoRef.current) ro.observe(bentoRef.current);
+    const bento = bentoRef.current;
+    if (bento) ro.observe(bento);
+    const stage = bento?.parentElement;
+    const onScroll = () => drawFlows();
+    stage?.addEventListener('scroll', onScroll, { passive: true });
     window.addEventListener('resize', drawFlows);
-    return () => { ro.disconnect(); window.removeEventListener('resize', drawFlows); };
+    return () => {
+      ro.disconnect();
+      stage?.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', drawFlows);
+    };
   }, [drawFlows]);
+
+  // ── Detail drawer: ESC to close + lock background scroll while open. ──
+  useEffect(() => {
+    if (!selectedId) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSelectedId(null); };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [selectedId]);
 
   // ── Meta hero body content (synthesized — these stations don't stream content). ──
   const cosBody = useMemo(() => {
@@ -357,8 +374,9 @@ export default function CompanyBentoBoard({
 
         {/* ─── stage: SVG flow lines + bento grid ─── */}
         <div className="sh-stage">
-          <svg ref={svgRef} className="sh-links" preserveAspectRatio="none" />
           <div className="sh-bento" ref={bentoRef}>
+            {/* Flow lines live INSIDE the bento so they scroll with the grid. */}
+            <svg ref={svgRef} className="sh-links" preserveAspectRatio="none" />
             {/* IDLE hero */}
             {heroKey === '__idle' && (
               <div className="sh-card idlehero pop" data-k="__idle">
@@ -497,26 +515,26 @@ export default function CompanyBentoBoard({
             )}
 
             {/* Dynamic specialist cards — render only as agent_start arrives.
-                On DELIVERED/COMPLETE, all collapse to mini header strips below
-                the answer hero. Otherwise non-hero working/done cards render
-                with their content + telemetry. */}
+                Tiles are ALWAYS the same fixed size (no hero promotion, no mini
+                collapse) so the grid never reflows as agents spawn/work/finish.
+                The streaming response is NOT shown inline; once an agent has
+                output you click its tile to read the full response in a drawer. */}
             {order.map((id) => {
               const a = agents[id]; if (!a) return null;
-              const isHero = heroKey === id;
-              const collapseToMini =
-                phase === 'DELIVERED' || phase === 'COMPLETE' ||
-                (a.status === 'done' && !isHero);
+              const hasOutput = a.status === 'done' || a.status === 'errored' ||
+                (a.status === 'working' && a.content.length > 0);
 
               const klass = [
                 'sh-card',
                 a.status === 'errored' ? 'errored' : a.status,
-                isHero ? 'hero' : '',
-                collapseToMini ? 'mini' : '',
+                hasOutput ? 'clickable' : '',
                 'pop',
               ].filter(Boolean).join(' ');
 
               const livedFor = a.status === 'working' && a.startedAt
                 ? fmtElapsed(Date.now() - a.startedAt) : '';
+
+              const open = () => { if (hasOutput) setSelectedId(id); };
 
               return (
                 <div
@@ -524,6 +542,13 @@ export default function CompanyBentoBoard({
                   className={klass}
                   data-k={id}
                   style={{ ['--ac' as string]: a.color } as React.CSSProperties}
+                  onClick={open}
+                  role={hasOutput ? 'button' : undefined}
+                  tabIndex={hasOutput ? 0 : undefined}
+                  onKeyDown={hasOutput ? (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+                  } : undefined}
+                  title={hasOutput ? 'Click to read the full response' : undefined}
                 >
                   {a.source === 'spawn' && <span className="spark">⚡ SPAWNED</span>}
                   <div className="hd">
@@ -531,45 +556,47 @@ export default function CompanyBentoBoard({
                       <span className="dot" />
                       <span className="nm">{a.title}</span>
                     </div>
-                    <span className={`st ${a.status === 'working' ? 'work' : a.status === 'done' ? 'done' : ''}`}>
+                    <span className={`st ${a.status === 'working' ? 'work' : a.status === 'done' ? 'done' : a.status === 'errored' ? 'errored' : ''}`}>
                       {a.status === 'working'
                         ? `WORKING${a.model ? ` · ${modelTag(a.model)}` : ''}`
-                        : a.status === 'done' ? 'DONE' : 'QUEUED'}
+                        : a.status === 'done' ? 'DONE'
+                        : a.status === 'errored' ? 'ERROR' : 'QUEUED'}
                     </span>
                   </div>
-                  {!collapseToMini && (
-                    <>
-                      <div className="bd">
-                        {a.content ? (
-                          isHero ? (
-                            <div className="agent-prose" style={{ fontSize: '0.66rem' }}>
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content}</ReactMarkdown>
-                            </div>
-                          ) : (
-                            <span style={{ whiteSpace: 'pre-wrap', display: 'block' }}>
-                              {a.content.slice(0, 260)}{a.content.length > 260 ? '…' : ''}
-                            </span>
-                          )
-                        ) : (
-                          <span style={{ color: 'var(--text-dim)' }}>
-                            {a.model ? `${modelTag(a.model)} · ` : ''}awaiting upstream…
-                          </span>
-                        )}
-                      </div>
-                      {a.status === 'working' && (
-                        <div className="stream">
-                          <span style={{ width: '92%' }} />
-                          <span style={{ width: '72%' }} />
-                          <span style={{ width: '58%' }} />
-                          <span style={{ width: '34%' }} />
-                        </div>
-                      )}
-                      <div className="foot">
-                        <span>{a.status === 'working' ? `T+${livedFor}` : a.status === 'done' ? 'done' : 'queued'}</span>
-                        <span>{a.model ? modelTag(a.model) : ''}</span>
-                      </div>
-                    </>
+
+                  <div className="bd">
+                    {a.status === 'working' ? (
+                      <span className="sh-working-hint">
+                        {a.model ? `${modelTag(a.model)} · ` : ''}working…
+                      </span>
+                    ) : a.status === 'queued' ? (
+                      <span style={{ color: 'var(--text-dim)' }}>
+                        {a.model ? `${modelTag(a.model)} · ` : ''}awaiting upstream…
+                      </span>
+                    ) : a.content ? (
+                      <span className="sh-preview">{a.content}</span>
+                    ) : (
+                      <span style={{ color: 'var(--text-dim)' }}>no output captured</span>
+                    )}
+                  </div>
+
+                  {a.status === 'working' && (
+                    <div className="stream">
+                      <span style={{ width: '92%' }} />
+                      <span style={{ width: '72%' }} />
+                      <span style={{ width: '58%' }} />
+                      <span style={{ width: '34%' }} />
+                    </div>
                   )}
+
+                  <div className="foot">
+                    <span>
+                      {a.status === 'working' ? `T+${livedFor}`
+                        : a.status === 'done' ? 'done'
+                        : a.status === 'errored' ? 'failed' : 'queued'}
+                    </span>
+                    <span>{hasOutput ? 'VIEW ▾' : (a.model ? modelTag(a.model) : '')}</span>
+                  </div>
                 </div>
               );
             })}
@@ -582,7 +609,126 @@ export default function CompanyBentoBoard({
           <span dangerouslySetInnerHTML={{ __html: isErr ? `<b>${errorMsg || 'Run failed'}</b>` : PHASE_NOTE[phase] }} />
         </div>
       </div>
+
+      {/* ─── agent response drawer ─── */}
+      {selected && (
+        <AgentDetailDrawer agent={selected} onClose={() => setSelectedId(null)} />
+      )}
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// AgentDetailDrawer — right-side panel with one agent's full response.
+// Reads live from the agent object, so opening a still-working agent
+// streams its output in real time and resolves to the final artifact.
+// ──────────────────────────────────────────────────────────────────
+function AgentDetailDrawer({ agent, onClose }: { agent: BentoAgent; onClose: () => void }) {
+  const stop = useCallback((e: React.MouseEvent) => e.stopPropagation(), []);
+  const statusLabel =
+    agent.status === 'working' ? 'WORKING'
+    : agent.status === 'done' ? 'DONE'
+    : agent.status === 'errored' ? 'ERROR' : 'QUEUED';
+
+  return (
+    <>
+      {/* scrim */}
+      <div
+        onClick={onClose}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 99,
+          background: 'rgba(6,6,15,0.6)', backdropFilter: 'blur(2px)',
+          animation: 'shAgFade 200ms ease-out',
+        }}
+      />
+      {/* drawer */}
+      <aside
+        onClick={stop}
+        style={{
+          position: 'fixed', top: 0, right: 0, bottom: 0,
+          width: 'min(680px, 100vw)', zIndex: 100,
+          background: 'var(--bg-surface)',
+          borderLeft: `1px solid ${agent.color}`,
+          boxShadow: '-12px 0 60px -20px rgba(0,0,0,0.6)',
+          display: 'flex', flexDirection: 'column',
+          animation: 'shAgSlide 240ms cubic-bezier(0.2,0.9,0.3,1)',
+          fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+        }}
+      >
+        {/* header */}
+        <div style={{
+          padding: '16px 20px',
+          borderBottom: '1px solid var(--border)',
+          background: 'var(--bg-elevated)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: agent.color, flexShrink: 0 }} />
+              <span style={{
+                fontSize: '0.66rem', fontWeight: 700, letterSpacing: '0.04em', color: agent.color,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {agent.title}
+              </span>
+              {agent.source === 'spawn' && (
+                <span style={{ fontSize: '0.46rem', letterSpacing: '0.1em', color: 'var(--pink)' }}>⚡ SPAWNED</span>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 12, fontSize: '0.5rem', letterSpacing: '0.12em', color: 'var(--text-dim)' }}>
+              <span>{statusLabel}</span>
+              {agent.model && <span>{modelTag(agent.model)}</span>}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'transparent', border: '1px solid var(--border-bright)',
+              color: 'var(--text-muted)', borderRadius: 4,
+              width: 28, height: 28, fontSize: '0.7rem', cursor: 'pointer',
+              fontFamily: 'inherit', flexShrink: 0,
+            }}
+            aria-label="Close response"
+            title="esc"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* body — full response */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px' }}>
+          {agent.content ? (
+            <div className="agent-prose" style={{ fontSize: '0.68rem', lineHeight: 1.75 }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.content}</ReactMarkdown>
+              {agent.status === 'working' && (
+                <span style={{ color: 'var(--text-dim)', letterSpacing: '0.1em' }}>▌ streaming…</span>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontSize: '0.62rem', color: 'var(--text-dim)', letterSpacing: '0.08em' }}>
+              {agent.status === 'working' ? '◌ working — no output yet…' : 'No output captured for this agent.'}
+            </div>
+          )}
+        </div>
+
+        {/* footer */}
+        <div style={{
+          padding: '8px 20px',
+          borderTop: '1px solid var(--border)',
+          fontSize: '0.5rem', letterSpacing: '0.1em', color: 'var(--text-dim)',
+          display: 'flex', justifyContent: 'space-between',
+        }}>
+          <span>esc · click outside to close</span>
+          <span>{agent.content ? `${agent.content.length.toLocaleString()} chars` : ''}</span>
+        </div>
+      </aside>
+
+      {/* keyframes inline (matches TrainerReportButton precedent) */}
+      <style>{`
+        @keyframes shAgFade { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes shAgSlide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+      `}</style>
+    </>
   );
 }
 
@@ -608,7 +754,7 @@ function MetaHero({
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
           </div>
         ) : (
-          body.split('\n').map((line, i) => <div key={i}>{line || ' '}</div>)
+          body.split('\n').map((line, i) => <div key={i}>{line || ' '}</div>)
         )}
       </div>
       {streaming && (

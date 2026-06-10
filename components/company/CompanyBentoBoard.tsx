@@ -145,10 +145,11 @@ export default function CompanyBentoBoard({
   const isErr = phase === 'ERRORED';
   const liveLabel = isErr ? 'ERROR' : isDone ? 'DONE' : isLive ? 'LIVE' : 'IDLE';
 
-  // ── Hero selection: phase-anchored only. During EXECUTING no specialist is
-  //    ever promoted to a 2×2 hero — that promotion (and its per-agent_start
-  //    churn) was what made the whole bento reflow every time an agent spawned.
-  //    Now specialists always render as uniform, fixed-size tiles. ──
+  // ── Hero selection: phase-anchored, plus a featured specialist during
+  //    EXECUTING. The bento is dynamic — the active agent gets a big "focus"
+  //    box that streams its work, while finished agents collapse to compact
+  //    tiles. (The old "super long box" came from `grid-auto-rows: 1fr`
+  //    stretching done cards; rows are now a fixed unit, so done == compact.) ──
   const heroKey: string = useMemo(() => {
     if (phase === 'IDLE') return '__idle';
     if (phase === 'COMPOSING') return '__meta_cos';
@@ -157,8 +158,20 @@ export default function CompanyBentoBoard({
     if (phase === 'SYNTHESIZING') return '__meta_syn';
     if (phase === 'DELIVERED' || phase === 'COMPLETE') return '__answer';
     if (phase === 'ERRORED') return '__error';
-    return '__none'; // EXECUTING — uniform tile grid, no jumping hero
-  }, [phase]);
+    // EXECUTING: feature the most recently started still-working specialist;
+    // fall back to the last finished one so the focus box is never empty.
+    const working = order
+      .map((id) => agents[id])
+      .filter((a): a is BentoAgent => Boolean(a) && a.status === 'working')
+      .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+    if (working[0]) return working[0].id;
+    const done = order
+      .map((id) => agents[id])
+      .filter((a): a is BentoAgent => Boolean(a) && a.status === 'done')
+      .sort((a, b) => (b.doneOrder ?? 0) - (a.doneOrder ?? 0));
+    if (done[0]) return done[0].id;
+    return '__none';
+  }, [phase, agents, order]);
 
   // ── Team chip strip: meta-stations (always) + dynamic specialists (after team_plan). ──
   type ChipState = 'dim' | 'on' | 'live' | 'done' | 'errored';
@@ -515,26 +528,35 @@ export default function CompanyBentoBoard({
             )}
 
             {/* Dynamic specialist cards — render only as agent_start arrives.
-                Tiles are ALWAYS the same fixed size (no hero promotion, no mini
-                collapse) so the grid never reflows as agents spawn/work/finish.
-                The streaming response is NOT shown inline; once an agent has
-                output you click its tile to read the full response in a drawer. */}
+                Size encodes activity: the featured (most-recent working) agent
+                is a big hero that streams its work inline; other working agents
+                are medium; finished/queued agents collapse to COMPACT tiles
+                (one grid unit — never stretched into a "super long box"). For
+                every non-featured card with output, click to read the full
+                response in the side drawer. */}
             {order.map((id) => {
               const a = agents[id]; if (!a) return null;
-              const hasOutput = a.status === 'done' || a.status === 'errored' ||
-                (a.status === 'working' && a.content.length > 0);
+              const isHero = heroKey === id;
+              const hasOutput = a.status === 'done' || a.status === 'errored' || a.content.length > 0;
+              // hero (big) > working (tall) > done/queued (compact, default span)
+              const sizeClass = isHero ? 'hero' : a.status === 'working' ? 'tall' : '';
+              // the hero shows its work inline; everyone else is click-to-view.
+              const clickable = hasOutput && !isHero;
+              // bars signal progress when there's no inline content to show.
+              const showBars = a.status === 'working' && (!isHero || !a.content);
 
               const klass = [
                 'sh-card',
                 a.status === 'errored' ? 'errored' : a.status,
-                hasOutput ? 'clickable' : '',
+                sizeClass,
+                clickable ? 'clickable' : '',
                 'pop',
               ].filter(Boolean).join(' ');
 
               const livedFor = a.status === 'working' && a.startedAt
                 ? fmtElapsed(Date.now() - a.startedAt) : '';
 
-              const open = () => { if (hasOutput) setSelectedId(id); };
+              const open = () => { if (clickable) setSelectedId(id); };
 
               return (
                 <div
@@ -543,12 +565,12 @@ export default function CompanyBentoBoard({
                   data-k={id}
                   style={{ ['--ac' as string]: a.color } as React.CSSProperties}
                   onClick={open}
-                  role={hasOutput ? 'button' : undefined}
-                  tabIndex={hasOutput ? 0 : undefined}
-                  onKeyDown={hasOutput ? (e) => {
+                  role={clickable ? 'button' : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onKeyDown={clickable ? (e) => {
                     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
                   } : undefined}
-                  title={hasOutput ? 'Click to read the full response' : undefined}
+                  title={clickable ? 'Click to read the full response' : undefined}
                 >
                   {a.source === 'spawn' && <span className="spark">⚡ SPAWNED</span>}
                   <div className="hd">
@@ -565,7 +587,12 @@ export default function CompanyBentoBoard({
                   </div>
 
                   <div className="bd">
-                    {a.status === 'working' ? (
+                    {isHero && a.content ? (
+                      // featured box — stream the live work inline
+                      <div className="agent-prose" style={{ fontSize: '0.66rem' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content}</ReactMarkdown>
+                      </div>
+                    ) : a.status === 'working' ? (
                       <span className="sh-working-hint">
                         {a.model ? `${modelTag(a.model)} · ` : ''}working…
                       </span>
@@ -580,7 +607,7 @@ export default function CompanyBentoBoard({
                     )}
                   </div>
 
-                  {a.status === 'working' && (
+                  {showBars && (
                     <div className="stream">
                       <span style={{ width: '92%' }} />
                       <span style={{ width: '72%' }} />
@@ -595,7 +622,7 @@ export default function CompanyBentoBoard({
                         : a.status === 'done' ? 'done'
                         : a.status === 'errored' ? 'failed' : 'queued'}
                     </span>
-                    <span>{hasOutput ? 'VIEW ▾' : (a.model ? modelTag(a.model) : '')}</span>
+                    <span>{clickable ? 'VIEW ▾' : (a.model ? modelTag(a.model) : '')}</span>
                   </div>
                 </div>
               );

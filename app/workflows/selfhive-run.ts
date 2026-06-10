@@ -55,7 +55,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 
     // Auto-mutation loop: distill trainer advice → store as overlays → promote pins.
     // Non-fatal if it fails — finalize still runs and the answer is delivered.
-    await distillStep(input.runId, input.userId, input.problem, plan.classification, plan.agents.map((a) => ({ id: a.id, title: a.title })), train.report);
+    await distillStep(input.runId, input.userId, input.problem, plan.classification, plan.agents.map((a) => ({ id: a.id, role: a.role, title: a.title })), train.report);
 
     await finalizeStep(input.runId, input.userId, plan, synth.answer, train.report, total);
     return { ok: true, costUsd: total.usd };
@@ -83,7 +83,7 @@ async function layerStep(
 }
 async function distillStep(
   runId: string, userId: string | null, problem: string,
-  classification: string, planAgents: { id: string; title: string }[], trainerReport: string,
+  classification: string, planAgents: { id: string; role: string; title: string }[], trainerReport: string,
 ) {
   'use step';
   const { distillImpl } = await import('@/lib/jobs/step-impl');

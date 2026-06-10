@@ -24,6 +24,7 @@ import { evaluatePromotion, evaluateRetirement } from './promotion';
 
 export interface SpawnedAgentInput {
   id: string;
+  role: string; // shared identity key — fan-out lanes of one spawned role share it
   title: string;
   domain?: string;
   systemPrompt: string;
@@ -88,24 +89,35 @@ export async function recordSpawnedWorkforce(args: {
     };
 
     // ── 1. Spawned agents (only scored ones — we can't judge an unscored spawn) ──
-    const instances: SpawnInstance[] = spawnedAgents
-      .map((a) => {
-        const s = scoreFor(a.title);
-        if (!s) return null;
-        return {
-          spawnedId: a.id,
-          title: a.title,
-          roleSummary: (a.successCriteria || a.taskContract).slice(0, 240),
-          domain: a.domain ?? 'general',
-          systemPrompt: a.systemPrompt,
-          taskContract: a.taskContract,
-          successCriteria: a.successCriteria,
-          needsLiveData: a.needsLiveData,
-          score: s.overall,
-          confidence: s.confidence,
-        } as SpawnInstance;
-      })
-      .filter((x): x is SpawnInstance => x !== null);
+    // FAN-OUT COLLAPSE: a SQUAD (multiple lanes of one spawned role in a single run)
+    // is conceptually ONE latent specialist working in parallel. We collapse its
+    // lanes into a single representative instance with the AVERAGE of their scores,
+    // so it (F2) earns exactly ONE appearance per run — not three, which would game
+    // PROMOTE_MIN_APPEARANCES — and (F1) routes to a single cluster via a canonical
+    // (lane-suffix-stripped) title.
+    const byRole = new Map<string, { exemplar: SpawnedAgentInput; scores: number[]; confs: number[] }>();
+    for (const a of spawnedAgents) {
+      const s = scoreFor(a.title);
+      if (!s) continue; // can't judge an unscored lane
+      const role = a.role || a.title;
+      const g = byRole.get(role);
+      if (g) { g.scores.push(s.overall); g.confs.push(s.confidence); }
+      else byRole.set(role, { exemplar: a, scores: [s.overall], confs: [s.confidence] });
+    }
+    const avg = (xs: number[]) => xs.reduce((sum, x) => sum + x, 0) / xs.length;
+    const instances: SpawnInstance[] = [...byRole.values()].map(({ exemplar: a, scores, confs }) => ({
+      spawnedId: a.id,
+      // Canonical, lane-agnostic title so all lanes resolve to one cluster.
+      title: a.title.split(' — ')[0].trim() || a.title,
+      roleSummary: (a.successCriteria || a.taskContract).slice(0, 240),
+      domain: a.domain ?? 'general',
+      systemPrompt: a.systemPrompt,
+      taskContract: a.taskContract,
+      successCriteria: a.successCriteria,
+      needsLiveData: a.needsLiveData,
+      score: avg(scores),
+      confidence: avg(confs),
+    } as SpawnInstance));
 
     if (instances.length > 0) {
       const ids: SpawnIdentityInput[] = instances.map((inst) => ({

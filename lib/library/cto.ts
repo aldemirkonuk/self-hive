@@ -17,9 +17,11 @@ const REASONING_HINTS = ['advisor', 'strateg', 'synthes', 'critic', 'analyst', '
 const GATHER_HINTS = ['research', 'gather', 'collect', 'fetch', 'monitor', 'scrape', 'scan', 'summar'];
 
 export function capabilityFloor(agent: PlannedAgent): ModelTier {
-  if (SONNET_FLOOR.has(agent.id)) return 'claude-sonnet-4-5';
-  if (HAIKU_FLOOR.has(agent.id)) return 'claude-haiku-4-5';
-  const t = (agent.id + ' ' + agent.title).toLowerCase();
+  // Key on `role`, not `id`, so every fan-out lane (quant_analyst_2, _3 …) inherits
+  // the same floor as the base role.
+  if (SONNET_FLOOR.has(agent.role)) return 'claude-sonnet-4-5';
+  if (HAIKU_FLOOR.has(agent.role)) return 'claude-haiku-4-5';
+  const t = (agent.role + ' ' + agent.title).toLowerCase();
   const reasons = REASONING_HINTS.some((h) => t.includes(h));
   const gathers = GATHER_HINTS.some((h) => t.includes(h));
   if (gathers && !reasons) return 'claude-haiku-4-5'; // pure mechanical work

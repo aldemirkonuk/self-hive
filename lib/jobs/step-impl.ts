@@ -68,11 +68,13 @@ function agentSystemPrompt(
   bundle?: ResourceBundle,
   overlays: OverlayRow[] = [],
 ): string {
+  // Identity (prompt, canon, grants, overlays) keys on `role` so every squad lane
+  // shares the same brain and learnings; per-instance state keys on `id`.
   const base = agent.source === 'library'
-    ? LIBRARY[agent.id]?.systemPrompt ?? custom[agent.id]?.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
+    ? LIBRARY[agent.role]?.systemPrompt ?? custom[agent.role]?.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
     : agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`;
-  const canon = loadCanonFor(agent.id as AgentRole);
-  const granted = effectFor(bundle, agent.id).systemPromptAddition;
+  const canon = loadCanonFor(agent.role as AgentRole);
+  const granted = effectFor(bundle, agent.role).systemPromptAddition;
   // Auto-mutated overlays from prior trainer runs — silently applied unless the
   // founder has flipped the global kill switch (loaded as [] in that case).
   const learnings = formatOverlaysForPrompt(overlays);
@@ -103,7 +105,9 @@ export async function composeImpl(
   const customDescs = Object.values(customAgents).map((c) => ({ id: c.id, title: c.title, domain: c.domain, mandate: c.successCriteria }));
   const cosEffect = effectFor(bundle, 'chief_of_staff');
   const cos = await client.messages.create({
-    model: 'claude-sonnet-4-5', max_tokens: 2000,
+    // Headroom (4000) for larger fan-out plans — a squad adds an agent + a full
+    // taskContract per lane; billed per token produced, so free on small plans.
+    model: 'claude-sonnet-4-5', max_tokens: 4000,
     // CoS now sees prior-run trainer scores — closes the improvement loop.
     system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory) + cosEffect.systemPromptAddition),
     messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
@@ -139,18 +143,20 @@ export async function runLayerImpl(
   const emit = await makeEmitter(runId);
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
 
-  // Load active overlays once per layer for all the agents about to run.
-  // One DB query batched across the layer; respects the kill switch.
+  // Load active overlays once per layer. Overlays are ROLE-scoped learnings, so we
+  // query by the layer's DISTINCT roles — every lane of a squad inherits the same
+  // accumulated improvements. One DB query batched across the layer; respects the
+  // kill switch.
   const overlaysByAgent = await loadActiveOverlaysForAgents(
     userId,
-    layer.map((a) => a.id),
+    [...new Set(layer.map((a) => a.role))],
     classification,
   );
 
   const results = await Promise.all(layer.map(async (agent, idx) => {
-    const color = LIBRARY[agent.id]?.color ?? customAgents[agent.id]?.color ?? COLORS[idx % COLORS.length];
+    const color = LIBRARY[agent.role]?.color ?? customAgents[agent.role]?.color ?? COLORS[idx % COLORS.length];
     const model = models[agent.id] ?? 'claude-sonnet-4-5';
-    await emit('agent_start', { agentId: agent.id, agentTitle: agent.title, agentColor: color, source: agent.source, model });
+    await emit('agent_start', { agentId: agent.id, agentTitle: agent.title, agentColor: color, role: agent.role, lane: agent.lane, source: agent.source, model });
 
     const deps = agent.dependsOn.map((d) => priorOutputs[d]).filter(Boolean) as { title: string; content: string }[];
     let content = ''; let lastFlush = 0; let inTok = 0; let outTok = 0;
@@ -158,9 +164,9 @@ export async function runLayerImpl(
     try {
       const stream = client.messages.stream({
         model, max_tokens: AGENT_MAX_TOKENS,
-        system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByAgent[agent.id] ?? [])),
+        system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByAgent[agent.role] ?? [])),
         messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
-        ...(agent.needsLiveData || effectFor(bundle, agent.id).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
+        ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       });
       for await (const ev of stream) {
         if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
@@ -292,7 +298,7 @@ export async function distillImpl(
   userId: string | null,
   problem: string,
   classification: string,
-  planAgents: { id: string; title: string }[],
+  planAgents: { id: string; role: string; title: string }[],
   trainerReport: string,
 ): Promise<{ inserted: number; promoted: number; skipped: boolean }> {
   if (!userId || !trainerReport || planAgents.length === 0) {
@@ -305,7 +311,9 @@ export async function distillImpl(
   try {
     const resp = await client.messages.create({
       model: 'claude-haiku-4-5', max_tokens: 1024,
-      system: cachedSystem(distillerSystemPrompt(planAgents)),
+      // The distiller attributes advice against the INSTANCE roster (so it can map
+      // each lane's trainer block to an id); storage is remapped to role below.
+      system: cachedSystem(distillerSystemPrompt(planAgents.map((a) => ({ id: a.id, title: a.title })))),
       messages: [{ role: 'user', content: `TRAINER REPORT (just delivered):\n\n${trainerReport}\n\nEmit the JSON array now.` }],
     });
     const tb = resp.content.find((b) => b.type === 'text');
@@ -316,9 +324,22 @@ export async function distillImpl(
 
   const candidates = parseDistillerOutput(parsed);
   const filtered = filterGeneralizable(candidates, problem);
-  // Drop anything for an agent not actually in the plan (model hallucinating ids).
-  const planIds = new Set(planAgents.map((a) => a.id));
-  const finalItems = filtered.filter((it) => planIds.has(it.agentId));
+
+  // Overlays are ROLE-scoped (they apply to every future instance of a role), so
+  // remap each item from its instance id to its role and drop hallucinated ids.
+  // Then dedupe by (role, category) so a squad contributes at most ONE overlay per
+  // category per role this run — the same shape a singleton produces, and it can't
+  // game the pin-promotion recurrence counter.
+  const roleById = new Map(planAgents.map((a) => [a.id, a.role]));
+  const seenRoleCat = new Set<string>();
+  const finalItems = filtered.flatMap((it) => {
+    const role = roleById.get(it.agentId);
+    if (!role) return [];
+    const key = `${role}::${it.category}`;
+    if (seenRoleCat.has(key)) return [];
+    seenRoleCat.add(key);
+    return [{ ...it, agentId: role }];
+  });
 
   const inserted = await insertOverlays(userId, runId, classification, finalItems);
   const promoted = inserted > 0 ? await promotePinsForUser(userId, classification) : 0;
@@ -363,6 +384,7 @@ export async function finalizeImpl(
         .filter((a) => a.source === 'spawn')
         .map((a) => ({
           id: a.id,
+          role: a.role,
           title: a.title,
           systemPrompt: a.systemPrompt ?? '',
           taskContract: a.taskContract,

@@ -793,7 +793,7 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 .sh-bento {
   position: relative; z-index: 1; min-height: 100%;
   display: grid; grid-template-columns: repeat(4, 1fr);
-  grid-auto-rows: var(--sh-u, 96px); align-content: start;
+  grid-auto-rows: var(--sh-u, 140px); align-content: start;
   gap: 11px; grid-auto-flow: dense;
 }
 @media (max-width: 920px) {
@@ -803,7 +803,7 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 .sh-card {
   position: relative; border: 1px solid var(--border); background: var(--bg-panel);
   border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
-  min-height: 0;
+  min-height: 0; order: 5; /* hero=0 floats up · done-mini=9 sinks down */
   transition: box-shadow 0.5s, border-color 0.5s, opacity 0.5s,
               transform 0.4s cubic-bezier(0.2,0.9,0.3,1);
 }
@@ -881,11 +881,9 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 .sh-card.working .stream span:last-child { width: 34% !important; background: var(--ac); }
 @keyframes sh-strpulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 
-/* hero (focus) — the featured, actively-working agent. Big, streams inline. */
-.sh-card.hero { grid-column: span 2; grid-row: span 3; }
+/* hero (focus) — the featured, actively-working agent. Big (2×2), streams inline. */
+.sh-card.hero { grid-column: span 2; grid-row: span 2; order: 0; }
 .sh-card.hero .bd { font-size: 12px; line-height: 1.65; }
-/* tall — a working but non-featured agent: medium, taller than a done tile. */
-.sh-card.tall { grid-row: span 2; }
 .sh-card.hero .id { font-size: 12px; }
 .sh-card.hero.working {
   box-shadow: 0 0 50px -14px color-mix(in srgb, var(--ac) 60%, transparent),
@@ -906,17 +904,17 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 }
 .sh-card.clickable .foot span:last-child { color: var(--ac); font-weight: 700; }
 
-/* tile body: clamped preview (done) + live "working…" hint — never grows the
-   tile; the full response opens on click. */
-.sh-card .bd .sh-preview {
-  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden; white-space: normal; word-break: break-word;
-}
+/* mini (done/errored) — header-only tile, exactly the mockup's collapsed look.
+   Body/stream/foot hidden; the full response opens in the drawer on click. */
+.sh-card.mini { order: 9; }
+.sh-card.mini .bd, .sh-card.mini .stream, .sh-card.mini .foot { display: none; }
+.sh-card.mini .hd { border-bottom: none; height: 100%; }
+/* live "working…" hint on active (non-mini) cards */
 .sh-card .bd .sh-working-hint { color: var(--ac); letter-spacing: 0.04em; }
 
 /* idle placeholder hero */
 .sh-card.idlehero {
-  grid-column: span 2; grid-row: span 3;
+  grid-column: span 2; grid-row: span 2; order: 0;
   align-items: center; justify-content: center; text-align: center;
   border-style: dashed; border-color: var(--border-bright); background: transparent;
 }
@@ -935,7 +933,7 @@ body.res-dragging .res-agent-card.drop-active .res-agent-body { border-color: va
 
 /* answer hero */
 .sh-card.answer {
-  grid-column: 1 / -1; grid-row: span 4;
+  grid-column: 1 / -1; grid-row: span 2; order: 0;
   border-color: var(--amber);
   box-shadow: 0 0 60px -20px var(--amber), 0 0 0 1px rgba(245,158,11,0.25) inset;
   background: linear-gradient(180deg, rgba(245,158,11,0.04), transparent 40%);

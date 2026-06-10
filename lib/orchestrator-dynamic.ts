@@ -40,7 +40,8 @@ let CUSTOM: Record<string, Specialist> = {};
 // Per-run granted resources (founder-assigned). Soft grants: additive only.
 let BUNDLE: ResourceBundle | undefined;
 function colorFor(agent: PlannedAgent, idx: number): string {
-  return LIBRARY[agent.id]?.color ?? CUSTOM[agent.id]?.color ?? COLORS[idx % COLORS.length];
+  // Identity (color, prompt, canon, grants) keys on `role` so squad lanes share it.
+  return LIBRARY[agent.role]?.color ?? CUSTOM[agent.role]?.color ?? COLORS[idx % COLORS.length];
 }
 
 const WEB_SEARCH_TOOL = {
@@ -58,12 +59,12 @@ function cachedSystem(prompt: string) {
 function agentSystemPrompt(agent: PlannedAgent): string {
   const base =
     agent.source === 'library'
-      ? LIBRARY[agent.id]?.systemPrompt ?? CUSTOM[agent.id]?.systemPrompt ?? agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
+      ? LIBRARY[agent.role]?.systemPrompt ?? CUSTOM[agent.role]?.systemPrompt ?? agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
       : agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`;
   // Q6: load any canon for this specialist (e.g. financial_advisor, risk_analyst)
-  const canon = loadCanonFor(agent.id as AgentRole);
+  const canon = loadCanonFor(agent.role as AgentRole);
   // Soft grants: append any founder-assigned resource content (additive only).
-  const granted = effectFor(BUNDLE, agent.id).systemPromptAddition;
+  const granted = effectFor(BUNDLE, agent.role).systemPromptAddition;
   return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT FOR THIS RUN:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}`;
 }
 
@@ -173,7 +174,10 @@ export async function* runDynamicTeam(
     const cosEffect = effectFor(BUNDLE, 'chief_of_staff');
     const cos = await client.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 2000,
+      // Headroom for larger plans: a fan-out squad adds an agent + a full
+      // taskContract per lane. Billed per token actually produced, so this costs
+      // nothing on small singleton plans; it just stops big squads truncating.
+      max_tokens: 4000,
       system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory) + cosEffect.systemPromptAddition),
       messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
       ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -223,6 +227,8 @@ export async function* runDynamicTeam(
         agentId: agent.id,
         agentTitle: agent.title,
         agentColor: colorFor(agent, plan.agents.indexOf(agent)),
+        role: agent.role,
+        lane: agent.lane,
         source: agent.source,
         model: modelFor(agent.id),
       };
@@ -237,7 +243,7 @@ export async function* runDynamicTeam(
         agent.id,
         agentSystemPrompt(agent),
         buildAgentContext(problem, agent, depOutputs),
-        agent.needsLiveData || effectFor(BUNDLE, agent.id).enableWebSearch,
+        agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch,
         modelFor(agent.id),
         signal
       );

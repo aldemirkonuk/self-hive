@@ -1,4 +1,4 @@
-import { PlannedAgent, ModelTier, TeamPlan } from './chief-of-staff';
+import { PlannedAgent, ModelTier, TeamPlan, MAX_FANOUT_PER_ROLE } from './chief-of-staff';
 import { capabilityFloor } from './cto';
 
 // MODEL SELECTION IS SHARED:
@@ -28,8 +28,33 @@ export function governBudget(plan: TeamPlan, cost?: CostContext): CFODecision {
   const costMode = avg !== undefined && avg > ceiling; // over budget → discipline
   const abundance = avg !== undefined && avg < ceiling * 0.4; // well under → spend on quality
 
+  // ── FAN-OUT BUDGET GATE ──
+  // The base team is sacrosanct: the FIRST instance of every role always runs
+  // (doctrine — specialists are never cut for budget). The CFO's headcount
+  // authority is limited to the EXTRA fan-out lanes a squad requested; it approves
+  // up to a budget-driven number per role and trims the rest:
+  //   costMode  → 1 per role (discipline: no extra lanes survive)
+  //   normal    → 2 per role
+  //   abundance → MAX_FANOUT_PER_ROLE per role (spend the surplus on coverage)
+  const allowedPerRole = costMode ? 1 : abundance ? MAX_FANOUT_PER_ROLE : 2;
+  const keptByRole = new Map<string, number>();
+  let requestedLanes = 0; // extra instances (beyond each role's base) the CoS asked for
+  let trimmedLanes = 0; // extra instances the CFO cut for budget
+  const kept: PlannedAgent[] = [];
+  for (const a of plan.agents) {
+    const n = keptByRole.get(a.role) ?? 0;
+    if (n >= 1) requestedLanes++; // base for this role already kept → this is a lane
+    if (n >= allowedPerRole) { trimmedLanes++; continue; }
+    keptByRole.set(a.role, n + 1);
+    kept.push(a);
+  }
+  const squads = [...keptByRole.values()].filter((n) => n > 1).length;
+  // Prune any dependency that pointed at a trimmed lane so the execution graph
+  // stays valid after the cut.
+  const keptIds = new Set(kept.map((a) => a.id));
+
   const modelByAgent: Record<string, ModelTier> = {};
-  const agents = plan.agents.map((a) => {
+  const agents = kept.map((a) => {
     const floor = capabilityFloor(a); // CTO's quality floor — CFO cannot go below
     let model: ModelTier = floor;
 
@@ -39,7 +64,7 @@ export function governBudget(plan: TeamPlan, cost?: CostContext): CFODecision {
       else model = 'claude-haiku-4-5'; // default + cost mode both hold at the floor
     }
     modelByAgent[a.id] = model;
-    return { ...a, model };
+    return { ...a, model, dependsOn: a.dependsOn.filter((d) => keptIds.has(d)) };
   });
 
   const sonnetCount = agents.filter((a) => a.model === 'claude-sonnet-4-5').length;
@@ -50,12 +75,15 @@ export function governBudget(plan: TeamPlan, cost?: CostContext): CFODecision {
   const costNote = avg !== undefined
     ? ` · "${plan.classification}" avg $${avg.toFixed(3)}${costMode ? ' (over ceiling → cost discipline)' : abundance ? ' (under budget → quality upgrades)' : ''}`
     : ' · best-results mode (no cost history yet)';
+  const fanoutNote = requestedLanes > 0
+    ? ` · ${requestedLanes - trimmedLanes}/${requestedLanes} fan-out lane${requestedLanes === 1 ? '' : 's'} approved across ${squads} squad${squads === 1 ? '' : 's'}${trimmedLanes > 0 ? ` (trimmed ${trimmedLanes} for budget)` : ''}`
+    : '';
 
   return {
     agents,
     modelByAgent,
     estimatedTier,
-    note: `CTO floors + CFO budget → ${agents.length} agents (${sonnetCount} Sonnet / ${agents.length - sonnetCount} Haiku), ${searcherCount} live-data${costNote}.`,
+    note: `CTO floors + CFO budget → ${agents.length} agents (${sonnetCount} Sonnet / ${agents.length - sonnetCount} Haiku), ${searcherCount} live-data${fanoutNote}${costNote}.`,
   };
 }
 

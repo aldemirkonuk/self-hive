@@ -143,7 +143,7 @@ async function executeDynamicJobInner(
             const pl = ev.plan as {
               classification?: string;
               isRegulatedFinance?: boolean;
-              agents?: Array<{ id: string; title: string; source?: string; systemPrompt?: string; taskContract?: string; successCriteria?: string; needsLiveData?: boolean }>;
+              agents?: Array<{ id: string; role?: string; title: string; source?: string; systemPrompt?: string; taskContract?: string; successCriteria?: string; needsLiveData?: boolean }>;
             };
             classification = String(pl.classification ?? '');
             isMarkets = isMarketsRun(classification, Boolean(pl.isRegulatedFinance));
@@ -151,6 +151,7 @@ async function executeDynamicJobInner(
               .filter((a) => a.source === 'spawn')
               .map((a) => ({
                 id: a.id,
+                role: a.role ?? a.id,
                 title: a.title,
                 systemPrompt: a.systemPrompt ?? '',
                 taskContract: a.taskContract ?? '',

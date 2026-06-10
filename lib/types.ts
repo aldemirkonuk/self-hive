@@ -94,9 +94,11 @@ export interface DynamicRunEvent {
     | 'run_cost'         // CFO cost ledger for the run
     | 'run_complete'
     | 'run_error';
-  agentId?: string;
+  agentId?: string;     // UNIQUE per-instance key
   agentTitle?: string;
   agentColor?: string;
+  role?: string;        // shared identity key (squad members share a role; undefined for meta-stations)
+  lane?: string;        // fan-out lane label (e.g. "Valuation"); undefined for singletons
   source?: 'library' | 'spawn' | 'system';
   model?: string;       // assigned tier
   delta?: string;

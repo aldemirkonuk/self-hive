@@ -12,6 +12,7 @@ export interface WorkflowInput {
   customAgents: Record<string, Specialist>;
   costByClass: Record<string, number>;
   resourceBundle?: ResourceBundle;
+  reputationBlock?: string; // HIVE ECONOMY: earned per-role standing for the CoS
 }
 
 /**
@@ -29,9 +30,9 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
   try {
     let total: Cost = { usd: 0, in: 0, out: 0 };
 
-    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory);
+    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '');
     total = sum(total, composed.cost);
-    const { plan, models } = composed;
+    const { plan, models, costMode } = composed;
 
     // Pure + deterministic: dependency layers from the composed plan.
     const layers = computeExecutionLayers(plan.agents);
@@ -45,6 +46,17 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
       outputs = { ...outputs, ...layerRes.outputs };
       total = sum(total, layerRes.cost);
     }
+
+    // BACKFIRE: one bounded, CFO-gated reinforcement round if any specialist signalled
+    // it couldn't finish. Folds reinforcements into the plan so the critic, synthesizer,
+    // trainer and self-staffing loop all see them.
+    const reinforced = await reinforceStep(
+      input.runId, input.problem, plan, outputs, input.customAgents, input.resourceBundle,
+      costMode, input.userId, plan.classification,
+    );
+    outputs = { ...outputs, ...reinforced.outputs };
+    total = sum(total, reinforced.cost);
+    if (reinforced.newAgents.length) plan.agents = [...plan.agents, ...reinforced.newAgents];
 
     const crit = await criticStep(input.runId, input.problem, outputs, input.resourceBundle);
     total = sum(total, crit.cost);
@@ -67,10 +79,10 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──
-async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string) {
+async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string) {
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
-  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory);
+  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '');
 }
 async function layerStep(
   runId: string, problem: string, layer: PlannedAgent[], prior: Outputs,
@@ -88,6 +100,15 @@ async function distillStep(
   'use step';
   const { distillImpl } = await import('@/lib/jobs/step-impl');
   return distillImpl(runId, userId, problem, classification, planAgents, trainerReport);
+}
+async function reinforceStep(
+  runId: string, problem: string, plan: TeamPlan, outputs: Outputs,
+  customAgents: Record<string, Specialist>, bundle: ResourceBundle | undefined,
+  costMode: boolean, userId: string | null, classification: string,
+) {
+  'use step';
+  const { reinforceImpl } = await import('@/lib/jobs/step-impl');
+  return reinforceImpl(runId, problem, plan, outputs, customAgents, bundle, costMode, userId ?? null, classification);
 }
 async function criticStep(runId: string, problem: string, outputs: Outputs, bundle?: ResourceBundle) {
   'use step';

@@ -8,6 +8,15 @@ import {
 } from './library/chief-of-staff';
 import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD, SYNTH_MAX_TOKENS, TRAINER_MAX_TOKENS, AGENT_MAX_TOKENS, CRITIC_MAX_TOKENS } from './library/cfo';
 import { applySpawner } from './library/spawner';
+import { capabilityFloor } from './library/cto';
+import {
+  extractReinforcement,
+  governReinforcement,
+  chiefOfStaffReinforcementPrompt,
+  parseReinforcementAgents,
+  REINFORCE_PROTOCOL,
+  type ReinforcementRequest,
+} from './library/reinforcement';
 import { criticSystemPrompt, buildCriticContext } from './library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from './library/synthesizer';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from './trainer/dynamic-trainer';
@@ -65,7 +74,7 @@ function agentSystemPrompt(agent: PlannedAgent): string {
   const canon = loadCanonFor(agent.role as AgentRole);
   // Soft grants: append any founder-assigned resource content (additive only).
   const granted = effectFor(BUNDLE, agent.role).systemPromptAddition;
-  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT FOR THIS RUN:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}`;
+  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT FOR THIS RUN:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${REINFORCE_PROTOCOL}`;
 }
 
 // Merge multiple async generators, yielding events as they arrive (true parallelism).
@@ -147,7 +156,8 @@ export async function* runDynamicTeam(
   trainerHistory = '',
   customAgents: Record<string, Specialist> = {},
   costByClassification: Record<string, number> = {},
-  resourceBundle?: ResourceBundle
+  resourceBundle?: ResourceBundle,
+  reputationBlock = ''
 ): AsyncGenerator<DynamicRunEvent> {
   CUSTOM = customAgents; // make custom agents resolvable for this run
   BUNDLE = resourceBundle; // founder-granted resources for this run
@@ -178,7 +188,7 @@ export async function* runDynamicTeam(
       // taskContract per lane. Billed per token actually produced, so this costs
       // nothing on small singleton plans; it just stops big squads truncating.
       max_tokens: 4000,
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory) + cosEffect.systemPromptAddition),
+      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock) + cosEffect.systemPromptAddition),
       messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
       ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
     });
@@ -257,6 +267,78 @@ export async function* runDynamicTeam(
       const { _final, _in, _out, ...clean } = ev;
       void _final; void _in; void _out;
       yield clean;
+    }
+  }
+
+  if (signal?.aborted) return;
+
+  // ── 2b. BACKFIRE: collect any specialist's reinforcement signal, strip the tags
+  //        so downstream never sees them, and — if the CFO approves — run ONE bounded
+  //        reinforcement round (extra lanes / spawned specialists) before the critic. ──
+  const reinforceRequests: ReinforcementRequest[] = [];
+  for (const [id, out] of outputs) {
+    const agent = plan.agents.find((a) => a.id === id);
+    if (!agent) continue;
+    const { cleaned, request } = extractReinforcement(agent, out.content);
+    if (request) reinforceRequests.push(request);
+    if (cleaned !== out.content) outputs.set(id, { ...out, content: cleaned });
+  }
+
+  if (reinforceRequests.length > 0) {
+    const avg = costByClassification[plan.classification];
+    const costMode = avg !== undefined && avg > DEFAULT_COST_CEILING_USD;
+    const budget = governReinforcement(reinforceRequests.length, { costMode, currentTeamSize: plan.agents.length });
+    yield { type: 'cfo_decision', note: budget.note };
+
+    if (budget.approved > 0) {
+      yield { type: 'cos_start' };
+      let reRaw = '';
+      try {
+        const re = await client.messages.create({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 2000,
+          system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, reinforceRequests, budget.approved)),
+          messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
+        });
+        const tb = re.content.find((b) => b.type === 'text');
+        reRaw = tb && 'text' in tb ? tb.text : '';
+        tally('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0);
+      } catch { reRaw = ''; }
+
+      const reAgents = applySpawner(parseReinforcementAgents(reRaw, plan.agents, budget.approved, customAgents));
+      if (reAgents.length > 0 && !signal?.aborted) {
+        for (const agent of reAgents) {
+          yield {
+            type: 'agent_start', agentId: agent.id, agentTitle: agent.title,
+            agentColor: colorFor(agent, plan.agents.length), role: agent.role, lane: agent.lane,
+            source: agent.source, model: capabilityFloor(agent),
+          };
+        }
+        const reGens = reAgents.map((agent) => {
+          const depOutputs = agent.dependsOn
+            .map((d) => outputs.get(d))
+            .filter((o): o is { title: string; content: string } => Boolean(o));
+          return streamAgent(
+            agent.id, agentSystemPrompt(agent), buildAgentContext(problem, agent, depOutputs),
+            agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch, capabilityFloor(agent), signal
+          );
+        });
+        const reTitleById = new Map(reAgents.map((a) => [a.id, a.title]));
+        for await (const ev of mergeGenerators(reGens)) {
+          if (ev._final !== undefined && ev.agentId) {
+            const reAgent = reAgents.find((a) => a.id === ev.agentId)!;
+            const { cleaned } = extractReinforcement(reAgent, ev._final); // do NOT recurse
+            outputs.set(ev.agentId, { title: reTitleById.get(ev.agentId) ?? ev.agentId, content: cleaned });
+            tally(capabilityFloor(reAgent), ev._in ?? 0, ev._out ?? 0);
+          }
+          const { _final, _in, _out, ...clean } = ev;
+          void _final; void _in; void _out;
+          yield clean;
+        }
+        // Fold reinforcements into the team so critic/synth/trainer/workforce see them.
+        plan.agents = [...plan.agents, ...reAgents];
+        reAgents.forEach((a) => { titleById.set(a.id, a.title); contractById.set(a.id, a.taskContract); });
+      }
     }
   }
 

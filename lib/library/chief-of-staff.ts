@@ -44,6 +44,7 @@ export interface CustomAgentDesc {
 export function chiefOfStaffSystemPrompt(
   customAgents: CustomAgentDesc[] = [],
   trainerHistory = '',
+  reputationBlock = '', // HIVE ECONOMY: earned per-role standing (see lib/library/reputation.ts)
 ): string {
   const libDesc = LIBRARY_IDS.map((id) => {
     const s = LIBRARY[id];
@@ -70,11 +71,15 @@ Your job: read an incoming problem and compose the RIGHT team to solve it and de
 You are the founder's company. The founder is the only user. For regulated domains (investing, etc.) you DO deliver real, substantive conclusions — the founder wants real analysis, not hedging — but you flag isRegulatedFinance so a disclaimer is attached.
 
 THE LIBRARY (select these by id):
-${libraryDesc}${trainerBlock}
+${libraryDesc}${trainerBlock}${reputationBlock}
 
 RULES:
 - Team size: deploy EVERY specialist the problem genuinely needs — up to ${MAX_TEAM_SIZE}. Domain mastery requires depth. Do NOT artificially shrink the team to save cost; the CFO handles cost by assigning cheaper models, never by cutting specialists. The only thing to avoid is REDUNDANT agents that do the same job. If a markets problem needs a Quant, a Risk Analyst, a Macro Analyst, a Sector Specialist, and a Sentiment Analyst — deploy all five.
-- FAN-OUT (SQUADS): the DEFAULT is exactly ONE instance per role. But when a single role faces more ground than one agent can cover — and a research/data shortage would otherwise cripple the answer — you MAY deploy that role as a SQUAD of up to ${MAX_FANOUT_PER_ROLE} parallel instances. YOU are the group leader: you divide the work into distinct, NON-OVERLAPPING lanes and write each lane its own taskContract. A squad is correct ONLY when the lanes are genuinely separable (e.g. a Quant squad split into Valuation / Momentum / Options-Flow lanes); it is WRONG to clone the same job — redundant lanes are the one thing to avoid. To fan a role out, emit multiple agents that share the SAME "role" but each have a UNIQUE "id", a UNIQUE lane-labeled "title", an optional "lane" label, and a DISTINCT "taskContract". The CFO approves the budget for the extra lanes and may trim them — so only fan out where the depth genuinely pays off.
+- DECOMPOSE-THEN-ROUTE (technical breakdown): for any complex or technical task, FIRST break it into its real sub-parts (a work-breakdown), THEN staff each piece with the RIGHT mechanism — don't crush everything onto one overloaded agent:
+    • sub-parts needing the SAME expertise, just more capacity/coverage → give ONE role multiple LANES (fan-out, below).
+    • sub-parts needing DIFFERENT expertise the library lacks → SPAWN a focused specialist for each.
+  Example: "build a trading dashboard" decomposes into data-pipeline + charting-frontend + backtest-engine — three DIFFERENT skills → three spawned specialists; whereas "value these 9 semiconductor names" decomposes into parallel slices of the SAME skill → one Quant role in lanes. Most hard problems need BOTH: a couple of squads AND a few spawned specialists.
+- FAN-OUT (SQUADS): the DEFAULT is exactly ONE instance per role. But when a single role faces more ground than one agent can cover — whether from a research/data shortage, OR because a single agent's deliverable would be too LARGE or DEEP to finish completely in one response (it would hit the output ceiling and truncate, leaving the work incomplete) — you MAY deploy that role as a SQUAD of up to ${MAX_FANOUT_PER_ROLE} parallel instances, each owning a slice small enough to finish in full. YOU are the group leader: you divide the work into distinct, NON-OVERLAPPING lanes and write each lane its own taskContract. A squad is correct ONLY when the lanes are genuinely separable (e.g. a Quant squad split into Valuation / Momentum / Options-Flow lanes); it is WRONG to clone the same job — redundant lanes are the one thing to avoid. To fan a role out, emit multiple agents that share the SAME "role" but each have a UNIQUE "id", a UNIQUE lane-labeled "title", an optional "lane" label, and a DISTINCT "taskContract". The CFO approves the budget for the extra lanes and may trim them — so only fan out where the depth genuinely pays off.
 - WEB SEARCH IS SLOW. To control LATENCY (not specialist count), prefer ONE or TWO live-data gatherers whose findings the other specialists build on, rather than every agent searching independently. Specialists still all exist — they just share research. For problems that don't need today's data (software, strategy, writing), set needsLiveData: false for everyone.
 - Every agent gets a TASK CONTRACT: a precise objective, the output format expected, and boundaries. Vague contracts cause bad work — be specific.
 - Build a DEPENDENCY GRAPH via dependsOn. Independent agents run in parallel; dependent ones wait. Max depth ${MAX_DEPENDENCY_DEPTH}.

@@ -12,6 +12,15 @@ import {
 } from '../library/chief-of-staff';
 import { governBudget, SYNTHESIZER_MODEL, TRAINER_MODEL, DEFAULT_COST_CEILING_USD, SYNTH_MAX_TOKENS, TRAINER_MAX_TOKENS, AGENT_MAX_TOKENS, CRITIC_MAX_TOKENS } from '../library/cfo';
 import { applySpawner } from '../library/spawner';
+import { capabilityFloor } from '../library/cto';
+import {
+  extractReinforcement,
+  governReinforcement,
+  chiefOfStaffReinforcementPrompt,
+  parseReinforcementAgents,
+  REINFORCE_PROTOCOL,
+  type ReinforcementRequest,
+} from '../library/reinforcement';
 import { criticSystemPrompt, buildCriticContext } from '../library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from '../library/synthesizer';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from '../trainer/dynamic-trainer';
@@ -78,7 +87,7 @@ function agentSystemPrompt(
   // Auto-mutated overlays from prior trainer runs — silently applied unless the
   // founder has flipped the global kill switch (loaded as [] in that case).
   const learnings = formatOverlaysForPrompt(overlays);
-  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}`;
+  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}${REINFORCE_PROTOCOL}`;
 }
 
 function buildAgentContext(problem: string, depOutputs: { title: string; content: string }[]): string {
@@ -98,6 +107,7 @@ export async function composeImpl(
   costByClass: Record<string, number>,
   bundle?: ResourceBundle,
   trainerHistory = '',
+  reputationBlock = '',
 ) {
   const emit = await makeEmitter(runId);
   await emit('cos_start');
@@ -109,7 +119,7 @@ export async function composeImpl(
     // taskContract per lane; billed per token produced, so free on small plans.
     model: 'claude-sonnet-4-5', max_tokens: 4000,
     // CoS now sees prior-run trainer scores — closes the improvement loop.
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory) + cosEffect.systemPromptAddition),
+    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock) + cosEffect.systemPromptAddition),
     messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
     ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });
@@ -129,33 +139,31 @@ export async function composeImpl(
     out: cos.usage?.output_tokens ?? 0,
     usd: costUsd('claude-sonnet-4-5', cos.usage?.input_tokens ?? 0, cos.usage?.output_tokens ?? 0),
   };
-  return { plan, models: cfo.modelByAgent, cost };
+  // costMode mirrors the CFO's budget signal — fed to the reinforcement step so the
+  // backfire loop is held under cost discipline.
+  const avg = costByClass[plan.classification];
+  const costMode = avg !== undefined && avg > DEFAULT_COST_CEILING_USD;
+  return { plan, models: cfo.modelByAgent, cost, costMode };
 }
 
-// ─── STEP 2: run one execution layer (parallel agents) ────────────────
-export async function runLayerImpl(
-  runId: string, problem: string, layer: PlannedAgent[],
+// Shared per-agent execution — drives a set of agents in parallel, emitting the
+// same events for each. Used by the normal layer step AND the reinforcement step
+// so streaming/cost/failure-isolation behaviour lives in exactly one place.
+type AgentResult = { id: string; title: string; content: string; in: number; out: number; usd: number };
+async function executeAgents(
+  emit: (type: string, payload?: Record<string, unknown>) => Promise<void>,
+  problem: string,
+  agents: PlannedAgent[],
   priorOutputs: Record<string, { title: string; content: string }>,
-  models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
-  userId: string | null = null,
-  classification: string | null = null,
-) {
-  const emit = await makeEmitter(runId);
+  modelOf: (agent: PlannedAgent) => string,
+  customAgents: Record<string, Specialist>,
+  bundle: ResourceBundle | undefined,
+  overlaysByRole: Record<string, OverlayRow[]>,
+): Promise<AgentResult[]> {
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
-
-  // Load active overlays once per layer. Overlays are ROLE-scoped learnings, so we
-  // query by the layer's DISTINCT roles — every lane of a squad inherits the same
-  // accumulated improvements. One DB query batched across the layer; respects the
-  // kill switch.
-  const overlaysByAgent = await loadActiveOverlaysForAgents(
-    userId,
-    [...new Set(layer.map((a) => a.role))],
-    classification,
-  );
-
-  const results = await Promise.all(layer.map(async (agent, idx) => {
+  return Promise.all(agents.map(async (agent, idx) => {
     const color = LIBRARY[agent.role]?.color ?? customAgents[agent.role]?.color ?? COLORS[idx % COLORS.length];
-    const model = models[agent.id] ?? 'claude-sonnet-4-5';
+    const model = modelOf(agent);
     await emit('agent_start', { agentId: agent.id, agentTitle: agent.title, agentColor: color, role: agent.role, lane: agent.lane, source: agent.source, model });
 
     const deps = agent.dependsOn.map((d) => priorOutputs[d]).filter(Boolean) as { title: string; content: string }[];
@@ -164,7 +172,7 @@ export async function runLayerImpl(
     try {
       const stream = client.messages.stream({
         model, max_tokens: AGENT_MAX_TOKENS,
-        system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByAgent[agent.role] ?? [])),
+        system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
         messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
         ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       });
@@ -185,6 +193,23 @@ export async function runLayerImpl(
     await emit('agent_done', { agentId: agent.id, artifact: content });
     return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
   }));
+}
+
+// ─── STEP 2: run one execution layer (parallel agents) ────────────────
+export async function runLayerImpl(
+  runId: string, problem: string, layer: PlannedAgent[],
+  priorOutputs: Record<string, { title: string; content: string }>,
+  models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
+  userId: string | null = null,
+  classification: string | null = null,
+) {
+  const emit = await makeEmitter(runId);
+  // Load active overlays once per layer. Overlays are ROLE-scoped learnings, so we
+  // query by the layer's DISTINCT roles — every lane of a squad inherits the same
+  // accumulated improvements. One DB query batched across the layer; respects the
+  // kill switch.
+  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification);
+  const results = await executeAgents(emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent);
 
   const out: Record<string, { title: string; content: string }> = {};
   let cost: StepCost = { ...ZERO_COST };
@@ -193,6 +218,71 @@ export async function runLayerImpl(
     cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
   });
   return { outputs: out, cost };
+}
+
+// ─── STEP 2b: BACKFIRE — reactive mid-run reinforcement (the §10 loop) ──
+// After the main team runs, collect any specialist's [[REINFORCE]] signal, strip the
+// tags so the critic/synth never see them, and — if the CFO approves against budget —
+// have the CoS compose up to N reinforcements (extra lanes / spawned specialists) that
+// run as one additional layer. Hard-bounded: one round, CFO-gated, per-role + team
+// caps enforced in parseReinforcementAgents. Returns cleaned originals + new outputs,
+// the new agents (so finalize scores/records them), and the round's cost.
+export async function reinforceImpl(
+  runId: string, problem: string, plan: TeamPlan,
+  outputs: Record<string, { title: string; content: string }>,
+  customAgents: Record<string, Specialist>, bundle: ResourceBundle | undefined,
+  costMode: boolean, userId: string | null, classification: string | null,
+): Promise<{ outputs: Record<string, { title: string; content: string }>; newAgents: PlannedAgent[]; cost: StepCost }> {
+  const emit = await makeEmitter(runId);
+
+  // 1. Collect requests + strip tags from existing outputs (return cleaned ones).
+  const cleaned: Record<string, { title: string; content: string }> = {};
+  const requests: ReinforcementRequest[] = [];
+  for (const agent of plan.agents) {
+    const o = outputs[agent.id];
+    if (!o) continue;
+    const r = extractReinforcement(agent, o.content);
+    if (r.request) requests.push(r.request);
+    if (r.cleaned !== o.content) cleaned[agent.id] = { title: o.title, content: r.cleaned };
+  }
+  if (requests.length === 0) return { outputs: cleaned, newAgents: [], cost: { ...ZERO_COST } };
+
+  // 2. CFO governs the round.
+  const budget = governReinforcement(requests.length, { costMode, currentTeamSize: plan.agents.length });
+  await emit('cfo_decision', { note: budget.note });
+  if (budget.approved <= 0) return { outputs: cleaned, newAgents: [], cost: { ...ZERO_COST } };
+
+  // 3. CoS composes the approved reinforcements.
+  await emit('cos_start');
+  let reRaw = ''; let cost: StepCost = { ...ZERO_COST };
+  try {
+    const re = await client.messages.create({
+      model: 'claude-sonnet-4-5', max_tokens: 2000,
+      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, requests, budget.approved)),
+      messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
+    });
+    const tb = re.content.find((b) => b.type === 'text');
+    reRaw = tb && 'text' in tb ? tb.text : '';
+    cost = { in: re.usage?.input_tokens ?? 0, out: re.usage?.output_tokens ?? 0, usd: costUsd('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0) };
+  } catch {
+    return { outputs: cleaned, newAgents: [], cost: { ...ZERO_COST } };
+  }
+
+  const newAgents = applySpawner(parseReinforcementAgents(reRaw, plan.agents, budget.approved, customAgents));
+  if (newAgents.length === 0) return { outputs: cleaned, newAgents: [], cost };
+
+  // 4. Execute the reinforcements as one layer (deps may point at existing outputs).
+  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(newAgents.map((a) => a.role))], classification);
+  const results = await executeAgents(emit, problem, newAgents, { ...outputs, ...cleaned }, (a) => capabilityFloor(a), customAgents, bundle, overlaysByAgent);
+
+  const merged: Record<string, { title: string; content: string }> = { ...cleaned };
+  for (const r of results) {
+    const reAgent = newAgents.find((a) => a.id === r.id)!;
+    const { cleaned: c } = extractReinforcement(reAgent, r.content); // never recurse
+    merged[r.id] = { title: r.title, content: c };
+    cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
+  }
+  return { outputs: merged, newAgents, cost };
 }
 
 // ─── STEP 3: critic ───────────────────────────────────────────────────

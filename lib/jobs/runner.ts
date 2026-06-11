@@ -49,13 +49,14 @@ export async function executeDynamicJob(
   problem: string,
   trainerHistory = '',
   userId: string | null = null,
-  resourceBundle?: ResourceBundle
+  resourceBundle?: ResourceBundle,
+  reputationBlock = ''
 ): Promise<void> {
   if (!isSupabaseConfigured()) return;
   if (activeRuns.has(runId)) return;
   activeRuns.add(runId);
   try {
-    await executeDynamicJobInner(runId, problem, trainerHistory, userId, resourceBundle);
+    await executeDynamicJobInner(runId, problem, trainerHistory, userId, resourceBundle, reputationBlock);
   } finally {
     activeRuns.delete(runId);
   }
@@ -66,7 +67,8 @@ async function executeDynamicJobInner(
   problem: string,
   trainerHistory: string,
   userId: string | null,
-  resourceBundle?: ResourceBundle
+  resourceBundle?: ResourceBundle,
+  reputationBlock = ''
 ): Promise<void> {
   const sb = await getServerSupabase();
   let seq = 0;
@@ -121,7 +123,7 @@ async function executeDynamicJobInner(
   let runCostRow: { classification: string; inputTokens: number; outputTokens: number; costUsd: number } | null = null;
 
   try {
-    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle)) {
+    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle, reputationBlock)) {
       switch (ev.type) {
         case 'agent_delta': {
           if (!ev.agentId) break;

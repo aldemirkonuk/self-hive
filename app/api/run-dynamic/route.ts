@@ -2,6 +2,7 @@ import { NextRequest, after } from 'next/server';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { createDynamicRun, executeDynamicJob } from '@/lib/jobs/runner';
 import { getTrainerHistory, formatHistoryForTrainer } from '@/lib/db/history';
+import { computeStandings, formatStandingsForCoS } from '@/lib/library/reputation';
 import { getCustomAgents } from '@/lib/library/custom';
 import { sanitizeProblem } from '@/lib/markets/util';
 import { buildResourceBundle } from '@/lib/resources/store';
@@ -84,12 +85,17 @@ export async function POST(req: NextRequest) {
   if (!runId) return json(500, { error: 'Could not create run.' });
 
   // Feed the dynamic TRAINER prior-run history so it can detect cross-run trends
-  // (the improvement loop). Empty on the first run.
+  // (the improvement loop). Empty on the first run. The same history powers the
+  // HIVE ECONOMY: per-role reputation the Chief of Staff drafts/benches by.
   let trainerHistory = '';
+  let reputationBlock = '';
   try {
-    trainerHistory = formatHistoryForTrainer(await getTrainerHistory(userId, 5));
+    const hist = await getTrainerHistory(userId, 12); // deeper window for standing
+    trainerHistory = formatHistoryForTrainer(hist.slice(-5)); // trainer reads the recent 5 for trend
+    reputationBlock = formatStandingsForCoS(computeStandings(hist));
   } catch {
     trainerHistory = '';
+    reputationBlock = '';
   }
 
   // Resolve founder-granted resources once, in this request's session context.
@@ -112,13 +118,13 @@ export async function POST(req: NextRequest) {
     const customAgents = await getCustomAgentsForRun(userId);
     const costByClass = await getCostByClassification(userId);
     await start(runSelfhiveWorkflow, [
-      { runId, problem: trimmed, userId, trainerHistory, customAgents, costByClass, resourceBundle },
+      { runId, problem: trimmed, userId, trainerHistory, customAgents, costByClass, resourceBundle, reputationBlock },
     ]);
   } catch (err) {
     console.error('[selfhive] Workflows unavailable, falling back to after():', err instanceof Error ? err.message : err);
     mode = 'after';
     after(async () => {
-      await executeDynamicJob(runId, trimmed, trainerHistory, userId, resourceBundle);
+      await executeDynamicJob(runId, trimmed, trainerHistory, userId, resourceBundle, reputationBlock);
     });
   }
 

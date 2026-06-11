@@ -5,7 +5,8 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { WORKFORCE, WORKFORCE_MODEL } from './constants';
-import { promote, retire, type SpawnCluster, type SpawnInstance } from './store';
+import { promote, retire, registerEvolvedChallenger, type SpawnCluster, type SpawnInstance } from './store';
+import { breedChallenger } from './genome';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3, timeout: 60_000 });
 
@@ -51,6 +52,32 @@ export async function evaluatePromotion(
     systemPrompt: synthesized.systemPrompt,
     needsLiveData: exemplar.needsLiveData,
   });
+
+  // GENOME: a promotion fires once per specialist (candidate → promoted) — the moment
+  // to BREED a challenger so the roster evolves, not just grows. The challenger is a
+  // mutated variant that competes in real runs; weak ones cull themselves via the
+  // retirement watch, a fitter one can later unseat its parent (evolveDecision).
+  // Strictly best-effort — breeding must never block or break a promotion.
+  if (ok) {
+    try {
+      const child = await breedChallenger({
+        title: cluster.canonical_title,
+        systemPrompt: synthesized.systemPrompt,
+        mandate: synthesized.mandate,
+      });
+      await registerEvolvedChallenger(cluster.user_id, cluster, {
+        agentKey: `${agentKey}_evo_${child.geneId}`,
+        title: child.title,
+        domain: cluster.canonical_domain,
+        mandate: child.mandate,
+        systemPrompt: child.systemPrompt,
+        needsLiveData: exemplar.needsLiveData,
+      });
+    } catch {
+      /* breeding is best-effort */
+    }
+  }
+
   return ok ? { title: cluster.canonical_title, agentKey } : null;
 }
 

@@ -182,6 +182,69 @@ export async function promote(
   return true;
 }
 
+/** GENOME: register a bred challenger offspring of a promoted parent. Writes it as a
+ *  deployable custom_agent (origin 'evolved', lineage via cluster_id) AND a tracking
+ *  cluster (status 'promoted', distinct title) so the existing retirement watch keeps
+ *  its rolling score and culls it if it proves weak. Best-effort. Seeds the rolling
+ *  score at the parent's so the challenger starts competitive, not instantly cullable. */
+export async function registerEvolvedChallenger(
+  userId: string,
+  parent: SpawnCluster,
+  agent: { agentKey: string; title: string; domain: string; mandate: string; systemPrompt: string; needsLiveData: boolean }
+): Promise<boolean> {
+  if (!isAdminConfigured()) return false;
+  const sb = getAdminSupabase();
+  const now = new Date().toISOString();
+
+  const { error } = await sb.from('custom_agents').upsert(
+    {
+      user_id: userId,
+      agent_key: agent.agentKey,
+      title: agent.title,
+      domain: agent.domain,
+      color: PROMOTED_COLOR,
+      mandate: agent.mandate,
+      system_prompt: agent.systemPrompt,
+      needs_live_data: agent.needsLiveData,
+      active: true,
+      origin: 'evolved',
+      cluster_id: parent.id,
+      promoted_at: now,
+      updated_at: now,
+    },
+    { onConflict: 'user_id,agent_key' }
+  );
+  if (error) return false;
+
+  // Idempotent: never create a second tracking cluster for the same challenger
+  // (defends against any double-breed / retry — the custom_agent upsert above is
+  // already idempotent on the unique, cluster-scoped agent_key).
+  const { data: existing } = await sb
+    .from('spawn_clusters')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('promoted_agent_key', agent.agentKey)
+    .limit(1);
+  if (!existing || existing.length === 0) {
+    await sb.from('spawn_clusters').insert({
+      user_id: userId,
+      canonical_title: agent.title,
+      canonical_domain: agent.domain,
+      role_summary: agent.mandate,
+      appearances: 0,
+      rolling_score: parent.rolling_score,
+      best_score: parent.rolling_score,
+      min_score: null,
+      last_score: null,
+      last_seen_run: null,
+      status: 'promoted',
+      promoted_agent_key: agent.agentKey,
+      promoted_at: now,
+    });
+  }
+  return true;
+}
+
 /** Retire: deactivate the promoted custom agent and mark the cluster 'retired'. */
 export async function retire(cluster: SpawnCluster): Promise<boolean> {
   if (!isAdminConfigured() || !cluster.promoted_agent_key) return false;

@@ -21,6 +21,7 @@ import {
 } from './store';
 import { resolveIdentities, type SpawnIdentityInput } from './registrar';
 import { evaluatePromotion, evaluateRetirement } from './promotion';
+import { resolveDuels } from './duel';
 
 export interface SpawnedAgentInput {
   id: string;
@@ -155,6 +156,20 @@ export async function recordSpawnedWorkforce(args: {
       if (c.status !== 'promoted' || touched.has(c.id)) continue;
       const s = scoreFor(c.canonical_title);
       if (s) await ingest(c, s.overall);
+    }
+
+    // ── 3. GENOME duel (Slice 2): match each promoted parent against its evolved
+    //       challenger on the freshly-updated rolling scores; a fitter challenger
+    //       UNSEATS its parent, a clearly-worse one is culled. This is what makes the
+    //       roster evolve, not just grow. Best-effort. ──
+    try {
+      const duels = await resolveDuels(userId, working);
+      for (const d of duels) {
+        retired.push(d.loser);
+        if (d.kind === 'evolved_won') promoted.push(d.winner); // the variant takes the throne
+      }
+    } catch {
+      /* non-fatal — duels never break a run */
     }
 
     return { promoted, retired, spawnsTracked: instances.length };

@@ -245,6 +245,52 @@ export async function registerEvolvedChallenger(
   return true;
 }
 
+/** GENOME: active permanent agents that take part in duels — promoted parents and their
+ *  evolved challengers, linked by a shared cluster_id. */
+export interface GenomeAgent {
+  agentKey: string;
+  title: string;
+  clusterId: string | null;
+  origin: string; // 'promoted' | 'evolved'
+}
+export async function listGenomeRoster(userId: string): Promise<GenomeAgent[]> {
+  if (!isAdminConfigured()) return [];
+  const sb = getAdminSupabase();
+  const { data } = await sb
+    .from('custom_agents')
+    .select('agent_key, title, cluster_id, origin')
+    .eq('user_id', userId)
+    .eq('active', true)
+    .in('origin', ['promoted', 'evolved']);
+  return (data ?? []).map((a) => ({
+    agentKey: a.agent_key as string,
+    title: a.title as string,
+    clusterId: (a.cluster_id as string | null) ?? null,
+    origin: a.origin as string,
+  }));
+}
+
+/** GENOME: cull a duel loser — deactivate its custom_agent (parent OR evolved offspring)
+ *  and retire its tracking cluster. Best-effort. */
+export async function cullDuelLoser(userId: string, agentKey: string, clusterId: string): Promise<boolean> {
+  if (!isAdminConfigured()) return false;
+  const sb = getAdminSupabase();
+  const now = new Date().toISOString();
+  const { error: e1 } = await sb
+    .from('custom_agents')
+    .update({ active: false, updated_at: now })
+    .eq('user_id', userId)
+    .eq('agent_key', agentKey)
+    .in('origin', ['promoted', 'evolved']);
+  const { error: e2 } = await sb
+    .from('spawn_clusters')
+    .update({ status: 'retired', retired_at: now, updated_at: now })
+    .eq('id', clusterId);
+  // Only report a cull (which the caller surfaces as a retired/promoted title) when
+  // BOTH writes landed — a half-cull stays re-evaluable next run (idempotent).
+  return !e1 && !e2;
+}
+
 /** Retire: deactivate the promoted custom agent and mark the cluster 'retired'. */
 export async function retire(cluster: SpawnCluster): Promise<boolean> {
   if (!isAdminConfigured() || !cluster.promoted_agent_key) return false;

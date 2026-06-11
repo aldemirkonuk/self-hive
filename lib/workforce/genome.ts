@@ -157,12 +157,9 @@ export type EvolveOutcome = 'challenger_wins' | 'incumbent_holds' | 'keep_compet
  * MIN_DUEL_APPEARANCES and beat the incumbent by WIN_MARGIN to take the throne; if it
  * falls behind by the margin it's culled; otherwise the duel continues. Pure.
  *
- * SLICE STATUS: this is wired into the post-run retirement pass in Slice 2 (compare the
- * parent vs challenger clusters' rolling scores → unseat or cull). Until then breeding
- * (Slice 1) is live and the SAFETY NET is the existing generic retirement watch: a
- * challenger that drifts below WORKFORCE.RETIRE_ROLLING_BELOW over enough appearances is
- * auto-retired, so the roster can't bloat with proven-bad offspring. Deliberate stub —
- * not dead code (unit-tested, called next slice).
+ * Wired into the post-run duel pass (lib/workforce/duel.ts → resolveDuels), which compares
+ * the parent vs challenger clusters' rolling scores each run. The generic retirement watch
+ * remains a backstop for either side that simply rots.
  */
 export function evolveDecision(args: {
   incumbentRep: number;
@@ -173,4 +170,41 @@ export function evolveDecision(args: {
   if (args.challengerRep >= args.incumbentRep + GENOME.WIN_MARGIN) return 'challenger_wins';
   if (args.challengerRep <= args.incumbentRep - GENOME.WIN_MARGIN) return 'incumbent_holds';
   return 'keep_competing';
+}
+
+// One side of a duel — a promoted parent or its evolved challenger, with the rolling
+// score + appearances its tracking cluster has accrued.
+export interface DuelParticipant {
+  agentKey: string;
+  title: string;
+  clusterId: string;
+  rolling: number;
+  appearances: number;
+}
+
+export interface DuelResolution {
+  outcome: Exclude<EvolveOutcome, 'keep_competing'>;
+  winnerTitle: string;
+  loserTitle: string;
+  loserAgentKey: string;
+  loserClusterId: string;
+}
+
+/**
+ * Resolve a parent↔challenger duel into the loser to cull, or null to keep competing.
+ * Pure — the runtime (resolveDuels) supplies the participants and applies the cull.
+ */
+export function duelResult(parent: DuelParticipant, challenger: DuelParticipant): DuelResolution | null {
+  const outcome = evolveDecision({
+    incumbentRep: parent.rolling,
+    challengerRep: challenger.rolling,
+    challengerAppearances: challenger.appearances,
+  });
+  if (outcome === 'challenger_wins') {
+    return { outcome, winnerTitle: challenger.title, loserTitle: parent.title, loserAgentKey: parent.agentKey, loserClusterId: parent.clusterId };
+  }
+  if (outcome === 'incumbent_holds') {
+    return { outcome, winnerTitle: parent.title, loserTitle: challenger.title, loserAgentKey: challenger.agentKey, loserClusterId: challenger.clusterId };
+  }
+  return null; // keep_competing
 }

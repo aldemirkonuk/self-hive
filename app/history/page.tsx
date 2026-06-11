@@ -73,20 +73,37 @@ export default async function HistoryPage() {
                         hasReport={r.hasTrainerReport}
                         problem={r.problem}
                       />
-                      <div className="flex gap-1 flex-shrink-0">
-                        {r.agentRoles.map((role) => (
+                      {/* Agent widgets — capped + wrapping so a large roster
+                          can never overflow the row. Extra agents collapse into
+                          a "+N" chip (hover lists them). */}
+                      <div className="flex flex-wrap gap-1 justify-end flex-shrink-0" style={{ maxWidth: 232 }}>
+                        {r.agentRoles.slice(0, 8).map((role) => (
                           <AgentBadge
                             key={role}
                             agent={role}
                             score={r.scores?.[role]}
                           />
                         ))}
+                        {r.agentRoles.length > 8 && (
+                          <div
+                            title={r.agentRoles.slice(8).join(', ')}
+                            style={{
+                              width: 22, height: 22, borderRadius: 4,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                              color: 'var(--text-muted)', fontSize: '0.45rem', fontWeight: 700,
+                              flexShrink: 0, lineHeight: 1,
+                            }}
+                          >
+                            +{r.agentRoles.length - 8}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
                   {/* Score strip */}
                   {r.scores && Object.keys(r.scores).length > 0 && (
-                    <div className="flex gap-3 mt-3 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-3 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
                       {Object.entries(r.scores).map(([role, score]) => (
                         <div key={role} className="flex items-center gap-1.5" style={{ fontSize: '0.55rem', color: 'var(--text-muted)' }}>
                           <span style={{ width: 6, height: 6, borderRadius: '50%', background: resolveAgentColor(role), flexShrink: 0 }} />

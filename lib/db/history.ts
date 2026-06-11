@@ -56,6 +56,29 @@ export async function getRecentRuns(userId: string, limit = 20): Promise<RunSumm
     rolesByRun.set(a.run_id, list);
   });
 
+  // Dynamic (company) runs have no `artifacts` rows — their roster lives in the
+  // run_events stream. Derive the participating agents from agent_start events
+  // (payload.agentTitle, the same string the Trainer keys its scores by) so the
+  // History row always shows agent widgets — even when the Trainer emitted an
+  // empty scores object, which previously hid every badge for that run.
+  const dynamicRunIds = runs.filter((r) => (r.kind ?? 'fixed') === 'dynamic').map((r) => r.id);
+  const dynRolesByRun = new Map<string, string[]>();
+  if (dynamicRunIds.length > 0) {
+    const { data: starts } = await sb
+      .from('run_events')
+      .select('run_id, payload')
+      .eq('type', 'agent_start')
+      .in('run_id', dynamicRunIds)
+      .order('id', { ascending: true });
+    (starts ?? []).forEach((e) => {
+      const title = (e.payload as { agentTitle?: string } | null)?.agentTitle;
+      if (!title) return;
+      const list = dynRolesByRun.get(e.run_id) ?? [];
+      if (!list.includes(title)) list.push(title);
+      dynRolesByRun.set(e.run_id, list);
+    });
+  }
+
   const scoresByRun = new Map<string, Record<string, number>>();
   (reports ?? []).forEach((r) => {
     const s = r.scores as Record<string, { overall?: number }> | null;
@@ -74,11 +97,17 @@ export async function getRecentRuns(userId: string, limit = 20): Promise<RunSumm
 
   return runs.map((r) => {
     const scores = scoresByRun.get(r.id) ?? null;
-    // Dynamic runs have no artifacts rows — derive participating agents from the
-    // trainer score keys (agent titles) instead.
+    // Dynamic runs: when the Trainer produced per-agent scores, key off those
+    // titles so each badge keeps its score overlay (the Trainer occasionally
+    // shortens a title, so its keys are the source of truth for scored runs).
+    // Otherwise fall back to the run_events roster so badges still appear when
+    // scores are empty/missing. Fixed runs use the artifact roles.
+    const hasScores = !!scores && Object.keys(scores).length > 0;
     const fixedRoles = rolesByRun.get(r.id) ?? [];
     const agentRoles =
-      r.kind === 'dynamic' && scores ? Object.keys(scores) : fixedRoles;
+      r.kind === 'dynamic'
+        ? (hasScores ? Object.keys(scores!) : (dynRolesByRun.get(r.id) ?? []))
+        : fixedRoles;
     return {
       id: r.id,
       problem: r.problem,

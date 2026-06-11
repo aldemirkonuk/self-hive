@@ -58,7 +58,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     total = sum(total, reinforced.cost);
     if (reinforced.newAgents.length) plan.agents = [...plan.agents, ...reinforced.newAgents];
 
-    const crit = await criticStep(input.runId, input.problem, outputs, input.resourceBundle);
+    const crit = await criticStep(input.runId, input.problem, outputs, input.resourceBundle, input.userId, plan.classification);
     total = sum(total, crit.cost);
     const synth = await synthesizeStep(input.runId, input.problem, outputs, crit.critique, plan.isRegulatedFinance, input.resourceBundle);
     total = sum(total, synth.cost);
@@ -68,6 +68,10 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     // Auto-mutation loop: distill trainer advice → store as overlays → promote pins.
     // Non-fatal if it fails — finalize still runs and the answer is delivered.
     await distillStep(input.runId, input.userId, input.problem, plan.classification, plan.agents.map((a) => ({ id: a.id, role: a.role, title: a.title })), train.report);
+
+    // HIVE IMMUNE SYSTEM: distill the critic's critique into reusable antibodies the
+    // critic screens against on future runs. Non-fatal — the answer is already delivered.
+    await immunizeStep(input.runId, input.userId, input.problem, plan.classification, crit.critique);
 
     await finalizeStep(input.runId, input.userId, plan, synth.answer, train.report, total);
     return { ok: true, costUsd: total.usd };
@@ -110,10 +114,15 @@ async function reinforceStep(
   const { reinforceImpl } = await import('@/lib/jobs/step-impl');
   return reinforceImpl(runId, problem, plan, outputs, customAgents, bundle, costMode, userId ?? null, classification);
 }
-async function criticStep(runId: string, problem: string, outputs: Outputs, bundle?: ResourceBundle) {
+async function criticStep(runId: string, problem: string, outputs: Outputs, bundle?: ResourceBundle, userId?: string | null, classification?: string) {
   'use step';
   const { criticImpl } = await import('@/lib/jobs/step-impl');
-  return criticImpl(runId, problem, outputs, bundle);
+  return criticImpl(runId, problem, outputs, bundle, userId ?? null, classification ?? null);
+}
+async function immunizeStep(runId: string, userId: string | null, problem: string, classification: string, critique: string) {
+  'use step';
+  const { immunizeImpl } = await import('@/lib/jobs/step-impl');
+  return immunizeImpl(runId, userId, problem, classification, critique);
 }
 async function synthesizeStep(runId: string, problem: string, outputs: Outputs, critique: string, isRegulated: boolean, bundle?: ResourceBundle) {
   'use step';

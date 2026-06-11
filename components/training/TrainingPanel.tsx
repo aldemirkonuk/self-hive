@@ -173,7 +173,8 @@ export default function TrainingPanel({ initialOverlays, initialAutoMutate }: Pr
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '0.06em', color: 'var(--text-primary)' }}>
-                {g.agentId}
+                {/* '__critic_antibody' = HIVE IMMUNE SYSTEM antibodies (see lib/library/immunizer.ts) */}
+                {g.agentId === '__critic_antibody' ? '🛡 CRITIC · IMMUNE MEMORY' : g.agentId}
               </span>
               <span style={{ fontSize: '0.5rem', letterSpacing: '0.1em', color: 'var(--text-dim)' }}>
                 {g.active.length} active{g.pinnedCount ? ` · ${g.pinnedCount} pinned` : ''}{g.disabled.length ? ` · ${g.disabled.length} disabled` : ''}

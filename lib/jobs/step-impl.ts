@@ -25,6 +25,7 @@ import { criticSystemPrompt, buildCriticContext } from '../library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from '../library/synthesizer';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from '../trainer/dynamic-trainer';
 import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable } from '../library/distiller';
+import { immunizerSystemPrompt, formatAntibodiesForPrompt, ANTIBODY_AGENT_ID } from '../library/immunizer';
 import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, type OverlayRow } from '../db/overlays';
 import { getUserSettingsAdmin } from '../db/settings';
 import { loadFounderManifest, loadCanonFor } from '../canon-loader';
@@ -285,16 +286,23 @@ export async function reinforceImpl(
   return { outputs: merged, newAgents, cost };
 }
 
-// ─── STEP 3: critic ───────────────────────────────────────────────────
-export async function criticImpl(runId: string, problem: string, outputs: Record<string, { title: string; content: string }>, bundle?: ResourceBundle) {
+// ─── STEP 3: critic (with HIVE IMMUNE MEMORY) ─────────────────────────
+export async function criticImpl(
+  runId: string, problem: string, outputs: Record<string, { title: string; content: string }>,
+  bundle?: ResourceBundle, userId: string | null = null, classification: string | null = null,
+) {
   const emit = await makeEmitter(runId);
   await emit('critic_start');
   const team = Object.values(outputs);
   const criticEffect = effectFor(bundle, 'critic');
+  // HIVE IMMUNE SYSTEM: load the critic's antibodies — failure patterns distilled from
+  // past critiques — and inject them so it red-teams WITH MEMORY (respects the kill switch).
+  const antibodyMap = await loadActiveOverlaysForAgents(userId, [ANTIBODY_AGENT_ID], classification);
+  const immuneMemory = formatAntibodiesForPrompt(antibodyMap[ANTIBODY_AGENT_ID] ?? []);
   let critique = ''; let inTok = 0; let outTok = 0;
   const stream = client.messages.stream({
     model: 'claude-sonnet-4-5', max_tokens: CRITIC_MAX_TOKENS,
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + criticEffect.systemPromptAddition),
+    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + immuneMemory + criticEffect.systemPromptAddition),
     messages: [{ role: 'user', content: buildCriticContext(problem, team) }],
     ...(criticEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });
@@ -432,6 +440,53 @@ export async function distillImpl(
   });
 
   const inserted = await insertOverlays(userId, runId, classification, finalItems);
+  const promoted = inserted > 0 ? await promotePinsForUser(userId, classification) : 0;
+  return { inserted, promoted, skipped: false };
+}
+
+// ─── STEP 6b: IMMUNIZE — distill the critic's critique into hive ANTIBODIES ──
+// The HIVE IMMUNE SYSTEM. Same shape as the distiller, pointed at the CRITIC: a small
+// Haiku pass reads the critique and extracts generalizable FAILURE PATTERNS as
+// critic-scoped overlays ("antibodies"). criticImpl loads them next run, so the critic
+// red-teams with memory; recurring antibodies get PINNED by the very same pin loop the
+// distiller uses. Reuses parseDistillerOutput + filterGeneralizable + insertOverlays +
+// promotePinsForUser wholesale. Best-effort + kill-switch gated — never breaks a run.
+export async function immunizeImpl(
+  runId: string,
+  userId: string | null,
+  problem: string,
+  classification: string,
+  critique: string,
+): Promise<{ inserted: number; promoted: number; skipped: boolean }> {
+  if (!userId || !critique || critique.trim().length < 40) return { inserted: 0, promoted: 0, skipped: true };
+  const settings = await getUserSettingsAdmin(userId);
+  if (!settings.autoMutateEnabled) return { inserted: 0, promoted: 0, skipped: true };
+
+  let parsed = '';
+  try {
+    const resp = await client.messages.create({
+      model: 'claude-haiku-4-5', max_tokens: 1024,
+      system: cachedSystem(immunizerSystemPrompt()),
+      messages: [{ role: 'user', content: `CRITIC'S RED-TEAM CRITIQUE (just delivered):\n\n${critique}\n\nEmit the antibody JSON array now.` }],
+    });
+    const tb = resp.content.find((b) => b.type === 'text');
+    parsed = tb && 'text' in tb ? tb.text : '';
+  } catch {
+    return { inserted: 0, promoted: 0, skipped: false };
+  }
+
+  const candidates = parseDistillerOutput(parsed);
+  const filtered = filterGeneralizable(candidates, problem);
+  // Antibodies are the CRITIC's immune memory — force agentId 'critic', and keep at most
+  // ONE per category this run (bounded growth; genuinely recurring ones pin over time).
+  const seenCat = new Set<string>();
+  const antibodies = filtered.flatMap((it) => {
+    if (seenCat.has(it.category)) return [];
+    seenCat.add(it.category);
+    return [{ ...it, agentId: ANTIBODY_AGENT_ID }];
+  });
+
+  const inserted = await insertOverlays(userId, runId, classification, antibodies);
   const promoted = inserted > 0 ? await promotePinsForUser(userId, classification) : 0;
   return { inserted, promoted, skipped: false };
 }

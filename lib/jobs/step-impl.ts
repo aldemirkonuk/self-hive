@@ -36,6 +36,8 @@ import { parseDynamicTrainerScores } from '../trainer/parse';
 import { recordSpawnedWorkforce } from '../workforce';
 import { extractPredictions } from '../markets/predictions';
 import { recordAndAllocate } from '../markets/portfolio';
+import { extractClaims } from '../claims/extract';
+import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
@@ -551,6 +553,14 @@ export async function finalizeImpl(
       if (picks.length > 0) {
         await recordAndAllocate(userId, runId, picks, sb);
       }
+    } catch { /* non-fatal */ }
+  } else if (userId && answer) {
+    // Generalized outcome loop — non-markets work has no price oracle, so extract
+    // falsifiable claims for the founder to grade later (the exogenous label that
+    // feeds the cross-domain Calibration Ledger).
+    try {
+      const claims = await extractClaims(answer, plan.classification);
+      if (claims.length > 0) await recordClaims(userId, runId, plan.classification, claims, sb);
     } catch { /* non-fatal */ }
   }
 

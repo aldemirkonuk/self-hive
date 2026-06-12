@@ -232,8 +232,8 @@ export async function checkOutcomes(userId: string, sbOverride?: SB): Promise<{
  * rising skill score it returns is the moat appreciating; a negative one past
  * MIN_SAMPLE is the kill signal (the corpus is breeding confident wrongness).
  */
-export async function getCalibrationReport(userId: string, sbOverride?: SB): Promise<CalibrationReport> {
-  if (!isSupabaseConfigured()) return computeCalibration([]);
+export async function getResolvedPredictionRows(userId: string, sbOverride?: SB): Promise<ResolvedPrediction[]> {
+  if (!isSupabaseConfigured()) return [];
   const sb = sbOverride ?? (await getServerSupabase());
 
   const { data } = await sb
@@ -244,15 +244,17 @@ export async function getCalibrationReport(userId: string, sbOverride?: SB): Pro
     .not('confidence', 'is', null)
     .not('outcome_correct', 'is', null);
 
-  const rows: ResolvedPrediction[] = (data ?? [])
+  return (data ?? [])
     .filter((r) => r.confidence != null && r.outcome_correct != null)
     .map((r) => ({
       confidence: Number(r.confidence),
       correct: Boolean(r.outcome_correct),
       outcomePct: Number(r.outcome_pct ?? 0),
     }));
+}
 
-  return computeCalibration(rows);
+export async function getCalibrationReport(userId: string, sbOverride?: SB): Promise<CalibrationReport> {
+  return computeCalibration(await getResolvedPredictionRows(userId, sbOverride));
 }
 
 export interface PortfolioSnapshot {

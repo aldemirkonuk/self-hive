@@ -3,6 +3,8 @@ import { runDynamicTeam } from '../orchestrator-dynamic';
 import { parseDynamicTrainerScores } from '../trainer/parse';
 import { extractPredictions } from '../markets/predictions';
 import { recordAndAllocate } from '../markets/portfolio';
+import { extractClaims } from '../claims/extract';
+import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
 import { getCustomAgents } from '../library/custom';
 import { recordSpawnedWorkforce, type SpawnedAgentInput } from '../workforce';
@@ -253,6 +255,15 @@ async function executeDynamicJobInner(
       }
     } catch (e) {
       console.error('[selfhive] outcome-loop allocation failed:', e);
+    }
+  } else if (userId && finalAnswer && status === 'completed') {
+    // Generalized outcome loop — extract falsifiable claims for the founder to
+    // grade later (the exogenous label that feeds cross-domain calibration).
+    try {
+      const claims = await extractClaims(finalAnswer, classification);
+      if (claims.length > 0) await recordClaims(userId, runId, classification, claims);
+    } catch (e) {
+      console.error('[selfhive] claim extraction failed:', e);
     }
   }
 

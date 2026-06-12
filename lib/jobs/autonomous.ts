@@ -4,6 +4,7 @@ import { getFounderUserId } from '../db/founder';
 import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../markets/portfolio';
 import { formatCalibrationLine, computeCalibration, type CalibrationReport, type CalibrationVerdict } from '../markets/calibration';
 import { buildPublicRecord, composeDispatch } from './dispatch';
+import { getOverallCalibration, getClaimCoverage } from '../claims/store';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
 
@@ -118,6 +119,21 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     console.log(`[autonomous] ${formatCalibrationLine(calReport)}`);
   } catch (e) {
     console.error('[autonomous] calibration read failed:', e);
+  }
+
+  // 1c. Cross-domain calibration — markets predictions + founder-graded claims, and
+  // how much of the claim corpus is exogenously graded yet (the coverage metric).
+  try {
+    const [overall, coverage] = await Promise.all([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      getOverallCalibration(userId, sb as any),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      getClaimCoverage(userId, sb as any),
+    ]);
+    console.log(`[autonomous] OVERALL ${formatCalibrationLine(overall.report)} · markets=${overall.marketsN} claims=${overall.claimsN}`);
+    console.log(`[autonomous] CLAIM COVERAGE ${coverage.resolved}/${coverage.open + coverage.resolved} graded (${Math.round(coverage.resolvedFraction * 100)}%)`);
+  } catch (e) {
+    console.error('[autonomous] overall calibration failed:', e);
   }
 
   // 2. CEO generates the next problem from the company's state.

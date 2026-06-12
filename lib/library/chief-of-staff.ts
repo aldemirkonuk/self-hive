@@ -45,6 +45,7 @@ export function chiefOfStaffSystemPrompt(
   customAgents: CustomAgentDesc[] = [],
   trainerHistory = '',
   reputationBlock = '', // HIVE ECONOMY: earned per-role standing (see lib/library/reputation.ts)
+  recallBlock = '', // HIVE MIND: past episodes most like this problem, illuminated (see lib/library/recall.ts)
 ): string {
   const libDesc = LIBRARY_IDS.map((id) => {
     const s = LIBRARY[id];
@@ -71,7 +72,7 @@ Your job: read an incoming problem and compose the RIGHT team to solve it and de
 You are the founder's company. The founder is the only user. For regulated domains (investing, etc.) you DO deliver real, substantive conclusions — the founder wants real analysis, not hedging — but you flag isRegulatedFinance so a disclaimer is attached.
 
 THE LIBRARY (select these by id):
-${libraryDesc}${trainerBlock}${reputationBlock}
+${libraryDesc}${trainerBlock}${reputationBlock}${recallBlock}
 
 RULES:
 - Team size: deploy EVERY specialist the problem genuinely needs — up to ${MAX_TEAM_SIZE}. Domain mastery requires depth. Do NOT artificially shrink the team to save cost; the CFO handles cost by assigning cheaper models, never by cutting specialists. The only thing to avoid is REDUNDANT agents that do the same job. If a markets problem needs a Quant, a Risk Analyst, a Macro Analyst, a Sector Specialist, and a Sentiment Analyst — deploy all five.

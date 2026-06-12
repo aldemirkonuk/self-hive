@@ -157,7 +157,8 @@ export async function* runDynamicTeam(
   customAgents: Record<string, Specialist> = {},
   costByClassification: Record<string, number> = {},
   resourceBundle?: ResourceBundle,
-  reputationBlock = ''
+  reputationBlock = '',
+  recallBlock = ''
 ): AsyncGenerator<DynamicRunEvent> {
   CUSTOM = customAgents; // make custom agents resolvable for this run
   BUNDLE = resourceBundle; // founder-granted resources for this run
@@ -188,7 +189,7 @@ export async function* runDynamicTeam(
       // taskContract per lane. Billed per token actually produced, so this costs
       // nothing on small singleton plans; it just stops big squads truncating.
       max_tokens: 4000,
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock) + cosEffect.systemPromptAddition),
+      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
       messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
       ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
     });

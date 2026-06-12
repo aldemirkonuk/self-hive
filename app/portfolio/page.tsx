@@ -1,15 +1,24 @@
 import Nav from '@/components/Nav';
 import OutcomeCheckButton from '@/components/OutcomeCheckButton';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
-import { getPortfolioSnapshot } from '@/lib/markets/portfolio';
+import { getPortfolioSnapshot, getCalibrationReport } from '@/lib/markets/portfolio';
+import type { CalibrationReport, CalibrationVerdict } from '@/lib/markets/calibration';
 
 export const dynamic = 'force-dynamic';
 
 const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
 const pnlColor = (n: number) => (n > 0 ? '#10b981' : n < 0 ? '#ef4444' : 'var(--text-muted)');
+const signed = (n: number, d = 2) => `${n >= 0 ? '+' : ''}${n.toFixed(d)}`;
+const VERDICT_COLOR: Record<CalibrationVerdict, string> = {
+  sharp: '#10b981', calibrated: '#f59e0b', kill: '#ef4444', thin: 'var(--text-muted)',
+};
+const VERDICT_LABEL: Record<CalibrationVerdict, string> = {
+  sharp: 'SHARP', calibrated: 'CALIBRATED', kill: '⚠ KILL', thin: 'THIN',
+};
 
 export default async function PortfolioPage() {
   let snap = null;
+  let cal: CalibrationReport | null = null;
   let signedIn = false;
 
   if (isSupabaseConfigured()) {
@@ -17,7 +26,10 @@ export default async function PortfolioPage() {
     const { data } = await sb.auth.getUser();
     if (data.user) {
       signedIn = true;
-      snap = await getPortfolioSnapshot(data.user.id);
+      [snap, cal] = await Promise.all([
+        getPortfolioSnapshot(data.user.id),
+        getCalibrationReport(data.user.id),
+      ]);
     }
   }
 
@@ -58,6 +70,12 @@ export default async function PortfolioPage() {
                 <Metric label="UNREALIZED" value={`${snap.unrealizedPnl >= 0 ? '+' : ''}${money(snap.unrealizedPnl)}`} sub="open positions" color={pnlColor(snap.unrealizedPnl)} />
                 <Metric label="WIN RATE" value={winRate === null ? '—' : `${winRate.toFixed(0)}%`} sub={`${snap.wins}W / ${snap.losses}L`} color="var(--text-primary)" />
                 <Metric label="CASH" value={money(snap.cash)} sub="available" color="var(--text-muted)" />
+                <Metric
+                  label="CALIBRATION"
+                  value={cal && cal.verdict !== 'thin' ? signed(cal.skillScore) : '—'}
+                  sub={cal ? `${VERDICT_LABEL[cal.verdict]} · n=${cal.n}` : 'no data'}
+                  color={cal ? VERDICT_COLOR[cal.verdict] : 'var(--text-muted)'}
+                />
               </div>
 
               {/* Open positions */}
@@ -106,6 +124,50 @@ export default async function PortfolioPage() {
                       </span>
                     ))}
                   </div>
+                )}
+              </Section>
+
+              {/* The Calibration Ledger — does stored confidence predict the win? */}
+              <Section title="CALIBRATION LEDGER — does the confidence it stored predict the outcome?">
+                {!cal || cal.n === 0 ? (
+                  <Empty>No resolved predictions yet. Calibration appears once positions resolve at horizon.</Empty>
+                ) : (
+                  <>
+                    <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))' }}>
+                      <Metric label="SKILL SCORE" value={cal.verdict === 'thin' ? '—' : signed(cal.skillScore)} sub="vs a coin (>0 = skill)" color={VERDICT_COLOR[cal.verdict]} />
+                      <Metric label="CORRELATION" value={cal.verdict === 'thin' ? '—' : signed(cal.correlation)} sub="conf ↔ outcome" color={VERDICT_COLOR[cal.verdict]} />
+                      <Metric label="BRIER" value={cal.brier.toFixed(3)} sub="0 best · 1 worst" color="var(--text-primary)" />
+                      <Metric label="CONFIDENCE BIAS" value={`${signed(cal.bias * 100, 0)}pts`} sub={cal.bias >= 0 ? 'overconfident' : 'underconfident'} color={pnlColor(-Math.abs(cal.bias))} />
+                    </div>
+                    {cal.verdict === 'thin' && (
+                      <p style={{ fontSize: '0.55rem', color: 'var(--text-dim)', marginBottom: 10 }}>
+                        Too thin to judge — need ~30 resolved outcomes ({cal.n} so far). Below that the skill score is held back.
+                      </p>
+                    )}
+                    {cal.verdict === 'kill' && (
+                      <p style={{ fontSize: '0.55rem', color: '#ef4444', marginBottom: 10 }}>
+                        ⚠ Stored confidence does not predict outcome (skill ≤ 0). The corpus is breeding confident wrongness — the kill signal.
+                      </p>
+                    )}
+                    <table style={{ width: '100%', fontSize: '0.6rem', borderCollapse: 'collapse' }}>
+                      <thead>
+                        <tr style={{ color: 'var(--text-dim)', fontSize: '0.5rem', letterSpacing: '0.08em' }}>
+                          <Th>CONFIDENCE BIN</Th><Th>N</Th><Th>CLAIMED</Th><Th>ACTUAL WIN</Th><Th>GAP</Th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {cal.buckets.map((b, i) => (
+                          <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                            <Td>{(b.lo * 100).toFixed(0)}–{(b.hi * 100).toFixed(0)}%</Td>
+                            <Td>{b.n}</Td>
+                            <Td>{(b.predicted * 100).toFixed(0)}%</Td>
+                            <Td>{(b.actual * 100).toFixed(0)}%</Td>
+                            <Td color={pnlColor(-Math.abs(b.gap))}>{signed(b.gap * 100, 0)}pts</Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </>
                 )}
               </Section>
             </>

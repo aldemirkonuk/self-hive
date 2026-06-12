@@ -3,6 +3,8 @@ import { runDynamicTeam } from '../orchestrator-dynamic';
 import { parseDynamicTrainerScores } from '../trainer/parse';
 import { extractPredictions } from '../markets/predictions';
 import { recordAndAllocate } from '../markets/portfolio';
+import { extractClaims } from '../claims/extract';
+import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
 import { getCustomAgents } from '../library/custom';
 import { recordSpawnedWorkforce, type SpawnedAgentInput } from '../workforce';
@@ -50,13 +52,14 @@ export async function executeDynamicJob(
   trainerHistory = '',
   userId: string | null = null,
   resourceBundle?: ResourceBundle,
-  reputationBlock = ''
+  reputationBlock = '',
+  recallBlock = ''
 ): Promise<void> {
   if (!isSupabaseConfigured()) return;
   if (activeRuns.has(runId)) return;
   activeRuns.add(runId);
   try {
-    await executeDynamicJobInner(runId, problem, trainerHistory, userId, resourceBundle, reputationBlock);
+    await executeDynamicJobInner(runId, problem, trainerHistory, userId, resourceBundle, reputationBlock, recallBlock);
   } finally {
     activeRuns.delete(runId);
   }
@@ -68,7 +71,8 @@ async function executeDynamicJobInner(
   trainerHistory: string,
   userId: string | null,
   resourceBundle?: ResourceBundle,
-  reputationBlock = ''
+  reputationBlock = '',
+  recallBlock = ''
 ): Promise<void> {
   const sb = await getServerSupabase();
   let seq = 0;
@@ -123,7 +127,7 @@ async function executeDynamicJobInner(
   let runCostRow: { classification: string; inputTokens: number; outputTokens: number; costUsd: number } | null = null;
 
   try {
-    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle, reputationBlock)) {
+    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle, reputationBlock, recallBlock)) {
       switch (ev.type) {
         case 'agent_delta': {
           if (!ev.agentId) break;
@@ -253,6 +257,15 @@ async function executeDynamicJobInner(
       }
     } catch (e) {
       console.error('[selfhive] outcome-loop allocation failed:', e);
+    }
+  } else if (userId && finalAnswer && status === 'completed') {
+    // Generalized outcome loop — extract falsifiable claims for the founder to
+    // grade later (the exogenous label that feeds cross-domain calibration).
+    try {
+      const claims = await extractClaims(finalAnswer, classification);
+      if (claims.length > 0) await recordClaims(userId, runId, classification, claims);
+    } catch (e) {
+      console.error('[selfhive] claim extraction failed:', e);
     }
   }
 

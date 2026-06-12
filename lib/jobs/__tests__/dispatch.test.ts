@@ -1,0 +1,89 @@
+// Isolated unit tests for the Publishing Organ — Slice 1 of the Hive Mind.
+//
+// Run with:  npm test
+//
+// composeDispatch is the EXPOSURE surface. The non-negotiable property under test:
+// it is honest by construction — losses get the same ink as wins, and the bulletin
+// is composed deterministically from real numbers with no LLM in the loop.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { buildPublicRecord, composeDispatch } from '../dispatch.ts';
+import { computeCalibration } from '../../markets/calibration.ts';
+import type { PortfolioSnapshot } from '../../markets/portfolio.ts';
+
+const AT = '2026-06-11T12:00:00.000Z';
+
+function snapshot(over: Partial<PortfolioSnapshot> = {}): PortfolioSnapshot {
+  return {
+    startingCapital: 100_000,
+    cash: 80_000,
+    realizedPnl: 4_200,
+    unrealizedPnl: -300,
+    totalValue: 103_900,
+    wins: 3,
+    losses: 1,
+    openPositions: [
+      { ticker: 'NVDA', direction: 'long', allocation: 12_000, entryPrice: 100, currentPrice: 99, unrealizedPnl: -120, retPct: -1 },
+    ],
+    resolved: [
+      { ticker: 'AAPL', direction: 'long', outcomePct: 6.2, correct: true },
+      { ticker: 'TSLA', direction: 'short', outcomePct: -3.4, correct: false },
+    ],
+    ...over,
+  };
+}
+
+// ── buildPublicRecord ─────────────────────────────────────────────────
+
+test('buildPublicRecord: derives P&L, pct, and win rate from the snapshot', () => {
+  const rec = buildPublicRecord({ snapshot: snapshot(), calibration: computeCalibration([]), generatedAt: AT });
+  assert.equal(rec.totalPnl, 3_900);
+  assert.ok(Math.abs(rec.totalPct - 3.9) < 1e-9);
+  assert.equal(rec.wins, 3);
+  assert.equal(rec.losses, 1);
+  assert.equal(rec.winRate, 75); // 3 of 4
+  assert.equal(rec.openPositions, 1);
+  assert.equal(rec.recentResolved.length, 2);
+});
+
+test('buildPublicRecord: a null snapshot yields a zeroed, honest record (winRate null)', () => {
+  const rec = buildPublicRecord({ snapshot: null, calibration: computeCalibration([]), generatedAt: AT });
+  assert.equal(rec.totalPnl, 0);
+  assert.equal(rec.totalPct, 0);
+  assert.equal(rec.winRate, null);
+  assert.equal(rec.openPositions, 0);
+  assert.equal(rec.recentResolved.length, 0);
+});
+
+// ── composeDispatch ───────────────────────────────────────────────────
+
+test('composeDispatch: publishes losses as plainly as wins', () => {
+  const rec = buildPublicRecord({ snapshot: snapshot(), calibration: computeCalibration([]), generatedAt: AT, latestCall: 'Buy the dip on semis.' });
+  const out = composeDispatch(rec);
+  assert.match(out, /AAPL/);            // the win
+  assert.match(out, /TSLA/);            // the loss
+  assert.match(out, /WIN/);
+  assert.match(out, /LOSS/);            // loss is not hidden
+  assert.match(out, /3W \/ 1L/);
+  assert.match(out, /On the table now/);
+  assert.match(out, /Buy the dip on semis\./);
+  assert.match(out, /EXPOSURE × OUTPUT QUALITY/);
+});
+
+test('composeDispatch: thin calibration shows n, not a skill claim', () => {
+  const rec = buildPublicRecord({ snapshot: snapshot({ resolved: [] }), calibration: computeCalibration([]), generatedAt: AT });
+  const out = composeDispatch(rec);
+  assert.match(out, /THIN/);
+  assert.match(out, /No positions resolved yet/);
+  assert.doesNotMatch(out, /Skill \+/); // no skill score asserted when thin
+});
+
+test('composeDispatch: a kill verdict is surfaced, not buried', () => {
+  // 40 resolved where high confidence loses → kill.
+  const rows = Array.from({ length: 40 }, (_, i) => ({ confidence: i % 2 === 0 ? 0.9 : 0.55, correct: i % 2 !== 0, outcomePct: 0 }));
+  const rec = buildPublicRecord({ snapshot: snapshot(), calibration: computeCalibration(rows), generatedAt: AT });
+  const out = composeDispatch(rec);
+  assert.match(out, /KILL|does NOT predict/);
+});

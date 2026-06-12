@@ -90,6 +90,8 @@ The dream is not the *last* feature; it is the **point**. The build order serves
 
 **The verdict — re-order, don't override.** The engineers' order (rows → illumination → dream) is right *for the craft* and wrong *for the business*: it builds the memory *read* before the *grade* and the *distribution*. *"A memory you read back faster is OUTPUT QUALITY polish on a product the world has never seen."* The business sequence, each step with a kill number:
 
+> **Build status (branch `feat/hive-mind-organ`):** Slices 0–3 all shipped — Calibration Ledger, Publishing Organ (public `/dispatch`), the generalized claim/outcome loop (`/claims`), and the Hive Mind recall + illumination + dream. Each built → audited → committed; 94 unit tests green.
+
 | # | Build | Seam | Kill number / success signal |
 |---|---|---|---|
 | **0** | **The Calibration Ledger** — when an outcome resolves, join it back to the Trainer score that produced it; emit one scalar: *does stored confidence predict realized outcome?* | `lib/markets/portfolio.ts::checkOutcomes` + stored run scores | **Kill:** after ~30 resolved outcomes, correlation ≤ 0 (worse than a coin) → stop; the genome is breeding confident wrongness. **Signal:** a positive, *rising* scalar — that number **is the moat appreciating.** |

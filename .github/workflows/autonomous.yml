@@ -1,8 +1,10 @@
 name: Autonomous cycle (12h)
 
 # The SELFHIVE autonomous CEO loop. Vercel Hobby cron only fires once/day, so the
-# 12-hour cadence is driven from GitHub Actions instead. Fires at 01:00 and 13:00
-# UTC — a uniform 12h apart — and can be run on demand via the Actions tab.
+# cadence is driven from GitHub Actions instead. Fires at 01:00 and 13:00 UTC for
+# the baseline 12h heartbeat (8pm/8am CDT), plus 4 extra overnight runs packed
+# into 08:00-11:45 UTC (3:00-6:45am CDT). Can also be run on demand via the
+# Actions tab. Times drift by 1h across DST since cron is fixed UTC.
 #
 # Required repo configuration (Settings → Secrets and variables → Actions):
 #   • Secret   CRON_SECRET         — must equal the CRON_SECRET in your Vercel env
@@ -10,7 +12,12 @@ name: Autonomous cycle (12h)
 
 on:
   schedule:
-    - cron: '0 1,13 * * *'
+    - cron: '0 1 * * *'    # 8:00 PM CDT
+    - cron: '0 13 * * *'   # 8:00 AM CDT
+    - cron: '0 8 * * *'    # 3:00 AM CDT
+    - cron: '15 9 * * *'   # 4:15 AM CDT
+    - cron: '30 10 * * *'  # 5:30 AM CDT
+    - cron: '45 11 * * *'  # 6:45 AM CDT
   workflow_dispatch:
 
 # Never let two cycles overlap if one runs long.

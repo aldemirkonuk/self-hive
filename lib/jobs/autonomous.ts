@@ -5,6 +5,9 @@ import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../ma
 import { formatCalibrationLine, computeCalibration, type CalibrationReport, type CalibrationVerdict } from '../markets/calibration';
 import { buildPublicRecord, composeDispatch } from './dispatch';
 import { getOverallCalibration, getClaimCoverage } from '../claims/store';
+import { getRecallBlock } from '../library/recall';
+import { runDream } from './dream';
+import { getUserSettingsAdmin } from '../db/settings';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
 
@@ -80,6 +83,8 @@ export interface AutonomousResult {
   calibration?: { skillScore: number; correlation: number; n: number; verdict: CalibrationVerdict };
   /** The outcome-graded public bulletin emitted this cycle (the Publishing Organ). */
   dispatch?: string;
+  /** The nightly consolidation result (the Dream): beliefs examined + culled. */
+  dream?: { examined: number; contradicted: number; culled: number; applied: boolean };
   problem?: string;
   runId?: string;
   mode?: string;
@@ -136,6 +141,22 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     console.error('[autonomous] overall calibration failed:', e);
   }
 
+  // 1d. The Dream — adversarial consolidation. Prosecute each durable belief
+  // against the reality of the run it came from and cull the ones reality refuted
+  // BEFORE the next waking run can inherit them. Gated on the founder's auto-mutation
+  // switch (observe-only when off); culling only disables (reversible).
+  let dream: AutonomousResult['dream'];
+  try {
+    const apply = (await getUserSettingsAdmin(userId)).autoMutateEnabled;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const digest = await runDream(sb as any, userId, apply);
+    dream = { examined: digest.examined, contradicted: digest.contradicted, culled: digest.culled, applied: digest.applied };
+    console.log(`[autonomous] DREAM examined ${digest.examined} · contradicted ${digest.contradicted} · culled ${digest.culled}${digest.applied ? '' : ' (observe-only)'}`);
+    digest.notes.forEach((n) => console.log(`[autonomous]   dream culled ${n}`));
+  } catch (e) {
+    console.error('[autonomous] dream failed:', e);
+  }
+
   // 2. CEO generates the next problem from the company's state.
   const problem = await generateProblem(userId);
 
@@ -167,7 +188,7 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     .select('id')
     .single();
   const runId = run?.id;
-  if (!runId) return { ok: false, outcomes, calibration, dispatch, problem, error: 'could not create run' };
+  if (!runId) return { ok: false, outcomes, calibration, dispatch, dream, problem, error: 'could not create run' };
 
   // Cost history for the CFO
   const costByClass: Record<string, number> = {};
@@ -183,20 +204,30 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     for (const [c, v] of Object.entries(acc)) costByClass[c] = v.sum / v.n;
   } catch { /* none */ }
 
+  // HIVE MIND: recall the past episodes most like this problem so the autonomous
+  // CoS composes from the company's lived memory, not a cold start.
+  let recallBlock = '';
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recallBlock = await getRecallBlock(sb as any, userId, problem);
+  } catch (e) {
+    console.error('[autonomous] recall failed:', e);
+  }
+
   let mode = 'workflow';
   try {
     const { start } = await import('workflow/api');
     const { runSelfhiveWorkflow } = await import('@/app/workflows/selfhive-run');
     await start(runSelfhiveWorkflow, [
-      { runId, problem, userId, trainerHistory: '', customAgents: {}, costByClass },
+      { runId, problem, userId, trainerHistory: '', customAgents: {}, costByClass, recallBlock },
     ]);
   } catch (e) {
     console.error('[autonomous] workflow start failed, using direct executor:', e);
     mode = 'direct';
     const { executeDynamicJob } = await import('./runner');
     // Run directly (bounded by the cron function's maxDuration; Workflow is preferred).
-    await executeDynamicJob(runId, problem, '', userId);
+    await executeDynamicJob(runId, problem, '', userId, undefined, '', recallBlock);
   }
 
-  return { ok: true, outcomes, calibration, dispatch, problem, runId, mode };
+  return { ok: true, outcomes, calibration, dispatch, dream, problem, runId, mode };
 }

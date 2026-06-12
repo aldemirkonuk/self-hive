@@ -13,6 +13,7 @@ export interface WorkflowInput {
   costByClass: Record<string, number>;
   resourceBundle?: ResourceBundle;
   reputationBlock?: string; // HIVE ECONOMY: earned per-role standing for the CoS
+  recallBlock?: string; // HIVE MIND: past episodes most like this problem, illuminated
 }
 
 /**
@@ -30,7 +31,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
   try {
     let total: Cost = { usd: 0, in: 0, out: 0 };
 
-    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '');
+    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '');
     total = sum(total, composed.cost);
     const { plan, models, costMode } = composed;
 
@@ -83,10 +84,10 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──
-async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string) {
+async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string, recallBlock?: string) {
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
-  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '');
+  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '');
 }
 async function layerStep(
   runId: string, problem: string, layer: PlannedAgent[], prior: Outputs,

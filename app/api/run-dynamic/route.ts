@@ -3,6 +3,7 @@ import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-serve
 import { createDynamicRun, executeDynamicJob } from '@/lib/jobs/runner';
 import { getTrainerHistory, formatHistoryForTrainer } from '@/lib/db/history';
 import { computeStandings, formatStandingsForCoS } from '@/lib/library/reputation';
+import { getRecallBlock } from '@/lib/library/recall';
 import { getCustomAgents } from '@/lib/library/custom';
 import { sanitizeProblem } from '@/lib/markets/util';
 import { buildResourceBundle } from '@/lib/resources/store';
@@ -98,6 +99,16 @@ export async function POST(req: NextRequest) {
     reputationBlock = '';
   }
 
+  // HIVE MIND: the past episodes most like this problem, each illuminated with its
+  // grade, outcome, and dissent — so the CoS composes from lived memory.
+  let recallBlock = '';
+  try {
+    const sb = await getServerSupabase();
+    recallBlock = await getRecallBlock(sb, userId, trimmed);
+  } catch {
+    recallBlock = '';
+  }
+
   // Resolve founder-granted resources once, in this request's session context.
   // Content is baked in here so the (session-less) workflow steps can use it.
   // Best-effort: a failure leaves agents on their defaults (soft-grant model).
@@ -118,13 +129,13 @@ export async function POST(req: NextRequest) {
     const customAgents = await getCustomAgentsForRun(userId);
     const costByClass = await getCostByClassification(userId);
     await start(runSelfhiveWorkflow, [
-      { runId, problem: trimmed, userId, trainerHistory, customAgents, costByClass, resourceBundle, reputationBlock },
+      { runId, problem: trimmed, userId, trainerHistory, customAgents, costByClass, resourceBundle, reputationBlock, recallBlock },
     ]);
   } catch (err) {
     console.error('[selfhive] Workflows unavailable, falling back to after():', err instanceof Error ? err.message : err);
     mode = 'after';
     after(async () => {
-      await executeDynamicJob(runId, trimmed, trainerHistory, userId, resourceBundle, reputationBlock);
+      await executeDynamicJob(runId, trimmed, trainerHistory, userId, resourceBundle, reputationBlock, recallBlock);
     });
   }
 

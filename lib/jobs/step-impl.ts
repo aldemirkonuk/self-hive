@@ -111,6 +111,7 @@ export async function composeImpl(
   bundle?: ResourceBundle,
   trainerHistory = '',
   reputationBlock = '',
+  recallBlock = '',
 ) {
   const emit = await makeEmitter(runId);
   await emit('cos_start');
@@ -122,7 +123,7 @@ export async function composeImpl(
     // taskContract per lane; billed per token produced, so free on small plans.
     model: 'claude-sonnet-4-5', max_tokens: 4000,
     // CoS now sees prior-run trainer scores — closes the improvement loop.
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock) + cosEffect.systemPromptAddition),
+    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
     messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
     ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });

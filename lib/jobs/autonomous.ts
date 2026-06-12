@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAdminSupabase, isAdminConfigured } from '../db/supabase-admin';
-import { getPortfolioSnapshot, checkOutcomes } from '../markets/portfolio';
+import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../markets/portfolio';
+import { formatCalibrationLine, type CalibrationVerdict } from '../markets/calibration';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
 
@@ -86,6 +87,8 @@ What is the single best markets problem to work on today? One sentence.`;
 export interface AutonomousResult {
   ok: boolean;
   outcomes?: { marked: number; resolved: number; realizedPnl: number };
+  /** The moat scalar on the wall: does stored confidence predict realized outcome? */
+  calibration?: { skillScore: number; correlation: number; n: number; verdict: CalibrationVerdict };
   problem?: string;
   runId?: string;
   mode?: string;
@@ -113,6 +116,19 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     console.error('[autonomous] checkOutcomes failed:', e);
   }
 
+  // 1b. Calibration Ledger — read the freshly-resolved record back into one number:
+  // does the confidence we stored predict the outcome we observed? Logged every
+  // cycle so the moat's value (or its rot) is always on the wall.
+  let calibration: AutonomousResult['calibration'];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cal = await getCalibrationReport(userId, sb as any);
+    calibration = { skillScore: cal.skillScore, correlation: cal.correlation, n: cal.n, verdict: cal.verdict };
+    console.log(`[autonomous] ${formatCalibrationLine(cal)}`);
+  } catch (e) {
+    console.error('[autonomous] calibration read failed:', e);
+  }
+
   // 2. CEO generates the next problem from the company's state.
   const problem = await generateProblem(userId);
 
@@ -123,7 +139,7 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     .select('id')
     .single();
   const runId = run?.id;
-  if (!runId) return { ok: false, outcomes, problem, error: 'could not create run' };
+  if (!runId) return { ok: false, outcomes, calibration, problem, error: 'could not create run' };
 
   // Cost history for the CFO
   const costByClass: Record<string, number> = {};
@@ -154,5 +170,5 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     await executeDynamicJob(runId, problem, '', userId);
   }
 
-  return { ok: true, outcomes, problem, runId, mode };
+  return { ok: true, outcomes, calibration, problem, runId, mode };
 }

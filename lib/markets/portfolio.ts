@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerSupabase, isSupabaseConfigured } from '../db/supabase-server';
 import { getQuote, getQuotes } from './finnhub';
 import { RawPick } from './predictions';
+import { computeCalibration, type CalibrationReport, type ResolvedPrediction } from './calibration';
 
 const STARTING_CAPITAL = 100_000;
 const MAX_POSITION_FRACTION = 0.12; // max 12% of starting capital per position
@@ -220,6 +221,38 @@ export async function checkOutcomes(userId: string, sbOverride?: SB): Promise<{
   }
 
   return { marked, resolved, realizedPnl };
+}
+
+/**
+ * The Calibration Ledger. Reads every resolved prediction — the (stored confidence,
+ * realized outcome) pairs checkOutcomes() has already written — and reduces them to
+ * one question: does the confidence we stored predict the win we later observed?
+ *
+ * No migration, no new write — pure read-back over data already on disk. The
+ * rising skill score it returns is the moat appreciating; a negative one past
+ * MIN_SAMPLE is the kill signal (the corpus is breeding confident wrongness).
+ */
+export async function getCalibrationReport(userId: string, sbOverride?: SB): Promise<CalibrationReport> {
+  if (!isSupabaseConfigured()) return computeCalibration([]);
+  const sb = sbOverride ?? (await getServerSupabase());
+
+  const { data } = await sb
+    .from('predictions')
+    .select('confidence, outcome_correct, outcome_pct')
+    .eq('user_id', userId)
+    .eq('status', 'resolved')
+    .not('confidence', 'is', null)
+    .not('outcome_correct', 'is', null);
+
+  const rows: ResolvedPrediction[] = (data ?? [])
+    .filter((r) => r.confidence != null && r.outcome_correct != null)
+    .map((r) => ({
+      confidence: Number(r.confidence),
+      correct: Boolean(r.outcome_correct),
+      outcomePct: Number(r.outcome_pct ?? 0),
+    }));
+
+  return computeCalibration(rows);
 }
 
 export interface PortfolioSnapshot {

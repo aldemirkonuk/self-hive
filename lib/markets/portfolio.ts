@@ -275,9 +275,9 @@ export interface PortfolioSnapshot {
   resolved: Array<{ ticker: string; direction: string; outcomePct: number; correct: boolean }>;
 }
 
-export async function getPortfolioSnapshot(userId: string): Promise<PortfolioSnapshot | null> {
+export async function getPortfolioSnapshot(userId: string, sbOverride?: SB): Promise<PortfolioSnapshot | null> {
   if (!isSupabaseConfigured()) return null;
-  const sb = await getServerSupabase();
+  const sb = sbOverride ?? (await getServerSupabase());
 
   const { data: state } = await sb
     .from('portfolio_state')

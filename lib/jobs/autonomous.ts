@@ -1,25 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { getAdminSupabase, isAdminConfigured } from '../db/supabase-admin';
+import { getFounderUserId } from '../db/founder';
 import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../markets/portfolio';
-import { formatCalibrationLine, type CalibrationVerdict } from '../markets/calibration';
+import { formatCalibrationLine, computeCalibration, type CalibrationReport, type CalibrationVerdict } from '../markets/calibration';
+import { buildPublicRecord, composeDispatch } from './dispatch';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 4 });
-
-// Resolve the founder's user id (single-user company) via the service role.
-async function getFounderUserId(): Promise<string | null> {
-  if (!isAdminConfigured()) return null;
-  const sb = getAdminSupabase();
-  try {
-    const { data } = await sb.auth.admin.listUsers();
-    const founder =
-      data.users.find((u) => u.email === 'founder@selfhive.app') ?? data.users[0];
-    return founder?.id ?? null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * The autonomous CEO. Surveys the company's state (portfolio, learned edges,
@@ -89,6 +77,8 @@ export interface AutonomousResult {
   outcomes?: { marked: number; resolved: number; realizedPnl: number };
   /** The moat scalar on the wall: does stored confidence predict realized outcome? */
   calibration?: { skillScore: number; correlation: number; n: number; verdict: CalibrationVerdict };
+  /** The outcome-graded public bulletin emitted this cycle (the Publishing Organ). */
+  dispatch?: string;
   problem?: string;
   runId?: string;
   mode?: string;
@@ -120,17 +110,39 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
   // does the confidence we stored predict the outcome we observed? Logged every
   // cycle so the moat's value (or its rot) is always on the wall.
   let calibration: AutonomousResult['calibration'];
+  let calReport: CalibrationReport | null = null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const cal = await getCalibrationReport(userId, sb as any);
-    calibration = { skillScore: cal.skillScore, correlation: cal.correlation, n: cal.n, verdict: cal.verdict };
-    console.log(`[autonomous] ${formatCalibrationLine(cal)}`);
+    calReport = await getCalibrationReport(userId, sb as any);
+    calibration = { skillScore: calReport.skillScore, correlation: calReport.correlation, n: calReport.n, verdict: calReport.verdict };
+    console.log(`[autonomous] ${formatCalibrationLine(calReport)}`);
   } catch (e) {
     console.error('[autonomous] calibration read failed:', e);
   }
 
   // 2. CEO generates the next problem from the company's state.
   const problem = await generateProblem(userId);
+
+  // 2b. Publishing Organ — compose the outcome-graded public bulletin from the
+  // freshly-resolved record + the call just made. Emitted to the cycle log now;
+  // the public /dispatch page renders the same record for the world. The only
+  // thing published is the GRADED record, so cadence cannot outrun grading.
+  let dispatch: string | undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const snap = await getPortfolioSnapshot(userId, sb as any);
+    dispatch = composeDispatch(
+      buildPublicRecord({
+        snapshot: snap,
+        calibration: calReport ?? computeCalibration([]),
+        generatedAt: new Date().toISOString(),
+        latestCall: problem,
+      })
+    );
+    console.log(`[autonomous] dispatch composed (${dispatch.length} chars)`);
+  } catch (e) {
+    console.error('[autonomous] dispatch compose failed:', e);
+  }
 
   // 3. Create the run + launch it (Workflow preferred, after()-style fallback).
   const { data: run } = await sb
@@ -139,7 +151,7 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     .select('id')
     .single();
   const runId = run?.id;
-  if (!runId) return { ok: false, outcomes, calibration, problem, error: 'could not create run' };
+  if (!runId) return { ok: false, outcomes, calibration, dispatch, problem, error: 'could not create run' };
 
   // Cost history for the CFO
   const costByClass: Record<string, number> = {};
@@ -170,5 +182,5 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     await executeDynamicJob(runId, problem, '', userId);
   }
 
-  return { ok: true, outcomes, calibration, problem, runId, mode };
+  return { ok: true, outcomes, calibration, dispatch, problem, runId, mode };
 }

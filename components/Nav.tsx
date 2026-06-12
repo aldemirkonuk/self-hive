@@ -8,6 +8,7 @@ import { getBrowserSupabase, isSupabaseConfiguredClient } from '@/lib/db/supabas
 const TABS = [
   { href: '/company', label: 'COMPANY' },
   { href: '/portfolio', label: 'PORTFOLIO' },
+  { href: '/dispatch', label: 'DISPATCH' },
   { href: '/decisions', label: 'DECISIONS' },
   { href: '/team', label: 'TEAM' },
   { href: '/hive', label: 'HIVE' },

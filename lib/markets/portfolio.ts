@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerSupabase, isSupabaseConfigured } from '../db/supabase-server';
-import { getQuote, getQuotes } from './finnhub';
+import { getQuote, getQuotes } from './oracle';
 import { RawPick } from './predictions';
 import { computeCalibration, type CalibrationReport, type ResolvedPrediction } from './calibration';
 

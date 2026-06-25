@@ -4,7 +4,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { getServerSupabase, isSupabaseConfigured } from '../db/supabase-server';
 import { getPortfolioSnapshot } from '../markets/portfolio';
-import { getQuotes } from '../markets/finnhub';
+import { getQuotes } from '../markets/oracle';
 import { staticAgents, staticCatalog, canonPathForId, FILE_COLOR } from './catalog';
 import { AgentSummary, ResourceDef, ResourcesPayload } from './types';
 import { ResourceBundle } from './runtime';

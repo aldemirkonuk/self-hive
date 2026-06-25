@@ -176,7 +176,7 @@ export async function composeImpl(
   // backfire loop is held under cost discipline.
   const avg = costByClass[plan.classification];
   const costMode = avg !== undefined && avg > DEFAULT_COST_CEILING_USD;
-  return { plan, models, cost, costMode };
+  return { plan, models, cost, costMode, elastic };
 }
 
 // Shared per-agent execution — drives a set of agents in parallel, emitting the

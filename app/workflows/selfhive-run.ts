@@ -33,19 +33,35 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 
     const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '', input.userId);
     total = sum(total, composed.cost);
-    const { plan, models, costMode } = composed;
+    const { plan, models, costMode, elastic } = composed;
 
     // Pure + deterministic: dependency layers from the composed plan.
     const layers = computeExecutionLayers(plan.agents);
 
     let outputs: Outputs = {};
     for (let i = 0; i < layers.length; i++) {
-      const layerRes = await layerStep(
-        input.runId, input.problem, layers[i], outputs, models, input.customAgents, input.resourceBundle,
-        input.userId, plan.classification,
-      );
-      outputs = { ...outputs, ...layerRes.outputs };
-      total = sum(total, layerRes.cost);
+      if (elastic) {
+        // agentStep: each agent runs as its OWN durable step (own 300s slot,
+        // crash-isolated, runs its own continuation relay), parallel within the
+        // layer. layerStep already handles a single-agent array, so we reuse it.
+        const results = await Promise.all(
+          layers[i].map((a) => layerStep(
+            input.runId, input.problem, [a], outputs, models, input.customAgents, input.resourceBundle,
+            input.userId, plan.classification,
+          )),
+        );
+        for (const res of results) {
+          outputs = { ...outputs, ...res.outputs };
+          total = sum(total, res.cost);
+        }
+      } else {
+        const layerRes = await layerStep(
+          input.runId, input.problem, layers[i], outputs, models, input.customAgents, input.resourceBundle,
+          input.userId, plan.classification,
+        );
+        outputs = { ...outputs, ...layerRes.outputs };
+        total = sum(total, layerRes.cost);
+      }
     }
 
     // BACKFIRE: one bounded, CFO-gated reinforcement round if any specialist signalled

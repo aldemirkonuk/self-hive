@@ -53,6 +53,17 @@ export const SYNC_CONCURRENCY = 6;
 export const BATCH_POLL_MS = 10_000;
 export const BATCH_MAX_WAIT_MS = 30 * 60_000;
 
+// CONTINUATION RELAY (P2′ — the UI-safe alternative to Batch). When a leaf hits
+// its output ceiling or self-reports incomplete, it continues IN THE SAME tile
+// (streaming preserved). Bounded so depth can never run away:
+export const MAX_RELAY_ROUNDS = 3;            // continuation rounds per agent
+// Hard ABANDON ceiling per agent across all its rounds — a safety guard, not the
+// "continue" signal. A stuck/runaway agent is aborted, its partial kept, run goes on.
+export const AGENT_ABANDON_MS = 20 * 60_000;  // 20 minutes
+// Round at/after which the continuation context is COMPACTED (the [[LEAF]] summary
+// + findings replace the full prior text) so the input window stays bounded.
+export const RELAY_COMPACT_FROM_ROUND = 2;
+
 // Model tiers. Haiku does the wide leaf work; Sonnet leads, critiques, reduces
 // and synthesizes; Opus only synthesizes flagship runs.
 export const MODEL_LEAF = 'claude-haiku-4-5';

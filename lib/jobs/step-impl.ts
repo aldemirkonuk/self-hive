@@ -43,7 +43,8 @@ import { isMarketsRun } from '../markets/util';
 import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext } from '../elastic/p1';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
 import { reserveBudget, recordArtifact } from '../elastic/ledger';
-import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE } from '../elastic/config';
+import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS } from '../elastic/config';
+import { relayShouldContinue, buildContinuationContext } from '../elastic/relay';
 import type { LeafOutput } from '../elastic/types';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
@@ -197,37 +198,99 @@ async function executeAgents(
   elastic = false,
 ): Promise<AgentResult[]> {
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
-  const disp = (c: string) => (elastic ? stripLeafTail(c) : c);
   return Promise.all(agents.map(async (agent, idx) => {
     const color = LIBRARY[agent.role]?.color ?? customAgents[agent.role]?.color ?? COLORS[idx % COLORS.length];
     const model = modelOf(agent);
     await emit('agent_start', { agentId: agent.id, agentTitle: agent.title, agentColor: color, role: agent.role, lane: agent.lane, source: agent.source, model });
 
     const deps = agent.dependsOn.map((d) => priorOutputs[d]).filter(Boolean) as { title: string; content: string }[];
-    let content = ''; let lastFlush = 0; let inTok = 0; let outTok = 0;
-    // LO-06: one agent's failure must not reject the whole layer — isolate it.
-    try {
-      const stream = client.messages.stream({
-        model, max_tokens: AGENT_MAX_TOKENS,
-        system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
-        messages: [{ role: 'user', content: buildAgentContext(problem, deps) + (elastic ? LEAF_PROMPT_SUFFIX : '') }],
-        ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
-      });
-      for await (const ev of stream) {
-        if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
-        if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
-        if (ev.type === 'content_block_start' && ev.content_block?.type === 'server_tool_use') await emit('searching', { agentId: agent.id });
-        if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
-          content += ev.delta.text;
-          const now = Date.now();
-          if (now - lastFlush > 1200) { lastFlush = now; await emit('agent_content', { agentId: agent.id, content: disp(content) }); }
+    let inTok = 0; let outTok = 0;
+
+    if (!elastic) {
+      // ── Original single-pass path (UNCHANGED — the off-path) ──
+      let content = ''; let lastFlush = 0;
+      try {
+        const stream = client.messages.stream({
+          model, max_tokens: AGENT_MAX_TOKENS,
+          system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
+          messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
+          ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
+        });
+        for await (const ev of stream) {
+          if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
+          if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
+          if (ev.type === 'content_block_start' && ev.content_block?.type === 'server_tool_use') await emit('searching', { agentId: agent.id });
+          if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
+            content += ev.delta.text;
+            const now = Date.now();
+            if (now - lastFlush > 1200) { lastFlush = now; await emit('agent_content', { agentId: agent.id, content }); }
+          }
         }
+      } catch (e) {
+        content = content || `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
       }
-    } catch (e) {
-      content = content || `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
+      await emit('agent_content', { agentId: agent.id, content });
+      await emit('agent_done', { agentId: agent.id, artifact: content });
+      return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
     }
-    await emit('agent_content', { agentId: agent.id, content: disp(content) });
-    await emit('agent_done', { agentId: agent.id, artifact: disp(content) });
+
+    // ── ELASTIC: continuation relay — same tile, streaming preserved. The agent
+    // continues if it hit its output ceiling or self-reported incomplete; the
+    // JSON tail is hidden from every emit; a 20-min ceiling abandons a runaway. ──
+    const baseCtx = buildAgentContext(problem, deps);
+    const system = cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? []));
+    const hasTools = agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch;
+    const startedAt = Date.now();
+    let content = ''; let lastFlush = 0; let round = 0;
+    let stopReason: string | null = null;
+    let hadBlock = false;
+    let leafOut: LeafOutput = { summary: '', confidence: 0, findings: [], citations: [] };
+
+    while (true) {
+      const userContent = round === 0 ? baseCtx + LEAF_PROMPT_SUFFIX : buildContinuationContext(baseCtx, content, leafOut, round);
+      const remaining = AGENT_ABANDON_MS - (Date.now() - startedAt);
+      if (remaining <= 0) break; // past the 20-min abandon ceiling
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), remaining);
+      let roundText = ''; let roundIn = 0; let roundOut = 0;
+      try {
+        const stream = client.messages.stream({
+          model, max_tokens: AGENT_MAX_TOKENS, system,
+          messages: [{ role: 'user', content: userContent }],
+          ...(hasTools ? { tools: [WEB_SEARCH_TOOL] } : {}),
+        }, { signal: ac.signal });
+        for await (const ev of stream) {
+          if (ev.type === 'message_start') roundIn = ev.message.usage?.input_tokens ?? 0;
+          if (ev.type === 'message_delta') {
+            roundOut = ev.usage?.output_tokens ?? roundOut;
+            if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
+          }
+          if (ev.type === 'content_block_start' && ev.content_block?.type === 'server_tool_use') await emit('searching', { agentId: agent.id });
+          if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
+            roundText += ev.delta.text;
+            const now = Date.now();
+            if (now - lastFlush > 1200) { lastFlush = now; await emit('agent_content', { agentId: agent.id, content: stripLeafTail(content + roundText) }); }
+          }
+        }
+      } catch (e) {
+        if (!content && !roundText) roundText = `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
+      } finally {
+        clearTimeout(timer);
+      }
+      inTok += roundIn; outTok += roundOut;
+      content += roundText;
+
+      const ex = extractLeaf(content);
+      leafOut = ex.output; hadBlock = ex.hadBlock;
+      if (!relayShouldContinue(stopReason, leafOut, hadBlock)) break;
+      if (round + 1 >= MAX_RELAY_ROUNDS) break;
+      if (Date.now() - startedAt >= AGENT_ABANDON_MS) break;
+      content = ex.prose; // strip the checkpoint block so the next round appends clean prose
+      round++;
+    }
+
+    await emit('agent_content', { agentId: agent.id, content: stripLeafTail(content) });
+    await emit('agent_done', { agentId: agent.id, artifact: stripLeafTail(content) });
     return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
   }));
 }

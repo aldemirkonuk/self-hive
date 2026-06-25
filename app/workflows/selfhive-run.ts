@@ -31,7 +31,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
   try {
     let total: Cost = { usd: 0, in: 0, out: 0 };
 
-    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '');
+    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '', input.userId);
     total = sum(total, composed.cost);
     const { plan, models, costMode } = composed;
 
@@ -59,9 +59,15 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     total = sum(total, reinforced.cost);
     if (reinforced.newAgents.length) plan.agents = [...plan.agents, ...reinforced.newAgents];
 
-    const crit = await criticStep(input.runId, input.problem, outputs, input.resourceBundle, input.userId, plan.classification);
+    // ELASTIC reduce: collapse each squad into one briefing so the critic + synth
+    // see bounded context. No-op (pass-through) when the flag is off. The TRAINER
+    // still scores the full per-lane `outputs`.
+    const reduced = await reduceStep(input.runId, plan, outputs);
+    total = sum(total, reduced.cost);
+
+    const crit = await criticStep(input.runId, input.problem, reduced.outputs, input.resourceBundle, input.userId, plan.classification);
     total = sum(total, crit.cost);
-    const synth = await synthesizeStep(input.runId, input.problem, outputs, crit.critique, plan.isRegulatedFinance, input.resourceBundle);
+    const synth = await synthesizeStep(input.runId, input.problem, reduced.outputs, crit.critique, plan.isRegulatedFinance, input.resourceBundle);
     total = sum(total, synth.cost);
     const train = await trainerStep(input.runId, input.problem, plan, outputs, synth.answer, input.trainerHistory, input.resourceBundle);
     total = sum(total, train.cost);
@@ -84,10 +90,19 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──
-async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string, recallBlock?: string) {
+async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string, recallBlock?: string, userId?: string | null) {
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
-  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '');
+  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '', userId ?? null);
+}
+// ELASTIC (P1): reduce squads → bounded context for critic/synth. Pass-through
+// when the flag is off, so the off-path is unchanged.
+async function reduceStep(runId: string, plan: TeamPlan, outputs: Outputs): Promise<{ outputs: Outputs; cost: Cost }> {
+  'use step';
+  const { isElastic } = await import('@/lib/elastic/p1');
+  if (!isElastic()) return { outputs, cost: { usd: 0, in: 0, out: 0 } };
+  const { reduceImpl } = await import('@/lib/jobs/step-impl');
+  return reduceImpl(runId, plan, outputs);
 }
 async function layerStep(
   runId: string, problem: string, layer: PlannedAgent[], prior: Outputs,

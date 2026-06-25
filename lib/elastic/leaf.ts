@@ -1,72 +1,52 @@
-// Elastic Workforce — structured leaf output (decision #3). A leaf agent does not
-// write prose we later parse; it CALLS a tool whose schema IS the LeafOutput
-// contract, with tool_choice forcing exactly that call. The arguments come back
-// as guaranteed-shaped JSON in a single request — highest quality (reliable
-// structure → ~no retries) at the lowest cost (Haiku, schema rides the cached
-// system path). Reducers merge these typed results up the tree, never raw text.
+// Elastic Workforce — structured leaf output WITHOUT changing the live UI.
+//
+// Decision #3 (forced tool-use) was DROPPED: it stops the token-by-token prose
+// streaming the bento UI shows. Instead, a leaf streams its normal narrative
+// (UI unchanged) and appends a delimited machine-readable block at the very end —
+// the exact [[REINFORCE]] tag pattern already used in step-impl. We strip that
+// block from everything the UI / critic / synth see, and parse it into a
+// LeafOutput for the reduce step. No forced tool-use, no second call, no UI change.
 
-import Anthropic from '@anthropic-ai/sdk';
 import type { LeafOutput, Finding, Citation } from './types';
-import { MODEL_LEAF, MAX_TOKENS_LEAF } from './config';
 
-// The tool whose input_schema mirrors LeafOutput. Keep the two in sync.
-export const LEAF_TOOL: Anthropic.Tool = {
-  name: 'submit_findings',
-  description:
-    'Submit your complete analysis as structured findings. You MUST call this exactly once with your full result — do not write prose outside it.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      summary: { type: 'string', description: '1-3 sentence distillation your lead will read.' },
-      confidence: { type: 'number', description: 'Overall confidence in your result, 0 to 1.' },
-      findings: {
-        type: 'array',
-        description: 'Your discrete findings.',
-        items: {
-          type: 'object',
-          properties: {
-            claim: { type: 'string' },
-            evidence: { type: 'string' },
-            confidence: { type: 'number', description: '0 to 1' },
-          },
-          required: ['claim'],
-        },
-      },
-      citations: {
-        type: 'array',
-        description: 'Sources backing the findings.',
-        items: {
-          type: 'object',
-          properties: {
-            source: { type: 'string', description: 'URL or artifact reference' },
-            note: { type: 'string' },
-          },
-          required: ['source'],
-        },
-      },
-      incomplete: {
-        type: 'boolean',
-        description: 'True if you could not finish your slice within the output budget.',
-      },
-      coverageGap: { type: 'string', description: 'What you left uncovered, if incomplete.' },
-    },
-    required: ['summary', 'confidence', 'findings'],
-  },
-};
+export const LEAF_OPEN = '[[LEAF]]';
+export const LEAF_CLOSE = '[[/LEAF]]';
+
+// Appended to a leaf agent's prompt. It writes its full analysis as usual, then
+// ends with the block.
+export const LEAF_PROMPT_SUFFIX = `
+
+When your analysis is complete, append your machine-readable result as the ABSOLUTE
+LAST thing in your response, wrapped EXACTLY like this (no text after the closing tag):
+${LEAF_OPEN}
+{"summary":"1-3 sentence distillation for your lead","confidence":0.0,"findings":[{"claim":"...","evidence":"...","confidence":0.0}],"citations":[{"source":"...","note":"..."}],"incomplete":false}
+${LEAF_CLOSE}
+Set "incomplete": true and add "coverageGap" ONLY if you could not finish your
+slice within your output budget.`;
+
+/**
+ * The prose to DISPLAY (and feed downstream as the narrative): everything before
+ * the structured block. Call on every streamed flush so the UI never shows the
+ * JSON tail — including a dangling partial open-sentinel mid-stream.
+ */
+export function stripLeafTail(content: string): string {
+  const i = content.indexOf(LEAF_OPEN);
+  if (i !== -1) return content.slice(0, i).trimEnd();
+  // Mid-stream: drop a trailing partial of the open sentinel (e.g. "[[LE").
+  for (let n = LEAF_OPEN.length - 1; n > 0; n--) {
+    if (content.endsWith(LEAF_OPEN.slice(0, n))) return content.slice(0, -n).trimEnd();
+  }
+  return content.trimEnd();
+}
 
 const clamp01 = (n: unknown): number => {
   const x = typeof n === 'number' && Number.isFinite(n) ? n : 0;
   return x < 0 ? 0 : x > 1 ? 1 : x;
 };
 
-/**
- * Normalize the model's tool input into a guaranteed-valid LeafOutput. Defensive
- * even with forced tool-use: clamp confidences, coerce arrays, drop malformed
- * entries — so one bad field can never poison the reduce step.
- */
-export function parseLeafToolInput(input: unknown): LeafOutput {
-  const o = (input ?? {}) as Record<string, unknown>;
-
+/** Defensive normalize of a parsed object into a guaranteed-valid LeafOutput. */
+export function normalizeLeaf(obj: unknown): LeafOutput {
+  const o = (obj ?? {}) as Record<string, unknown>;
   const findings: Finding[] = Array.isArray(o.findings)
     ? (o.findings as Record<string, unknown>[])
         .filter((f) => f && typeof f.claim === 'string')
@@ -76,7 +56,6 @@ export function parseLeafToolInput(input: unknown): LeafOutput {
           confidence: f.confidence === undefined ? undefined : clamp01(f.confidence),
         }))
     : [];
-
   const citations: Citation[] = Array.isArray(o.citations)
     ? (o.citations as Record<string, unknown>[])
         .filter((c) => c && typeof c.source === 'string')
@@ -85,7 +64,6 @@ export function parseLeafToolInput(input: unknown): LeafOutput {
           note: typeof c.note === 'string' ? c.note : undefined,
         }))
     : [];
-
   return {
     summary: typeof o.summary === 'string' ? o.summary : '',
     confidence: clamp01(o.confidence),
@@ -96,37 +74,43 @@ export function parseLeafToolInput(input: unknown): LeafOutput {
   };
 }
 
-export interface LeafRunResult {
-  output: LeafOutput;
-  inTokens: number;
-  outTokens: number;
-  stopReason: string | null;
+export interface ExtractedLeaf {
+  prose: string;      // narrative with the block removed (for UI / critic / synth)
+  output: LeafOutput; // structured result for the reduce step
+  hadBlock: boolean;  // false → fell back to a prose-derived summary
 }
 
 /**
- * Run one leaf agent and get structured output back, forcing the submit_findings
- * tool. The Anthropic client is injected (testability + shared config). Note:
- * forced tool-use is exclusive with live web search — search-needing leaves take
- * a multi-turn path added in a later phase.
+ * Split a completed leaf response into displayable prose + structured LeafOutput.
+ * Graceful: a missing or malformed block NEVER fails a run — it degrades to a
+ * prose-derived summary (neutral confidence, no findings), exactly like the
+ * [[REINFORCE]] extractor degrades.
  */
-export async function runLeaf(
-  client: Anthropic,
-  args: { system: string; user: string; model?: string; maxTokens?: number },
-): Promise<LeafRunResult> {
-  const msg = await client.messages.create({
-    model: args.model ?? MODEL_LEAF,
-    max_tokens: args.maxTokens ?? MAX_TOKENS_LEAF,
-    system: args.system,
-    messages: [{ role: 'user', content: args.user }],
-    tools: [LEAF_TOOL],
-    tool_choice: { type: 'tool', name: LEAF_TOOL.name },
-  });
-  const block = msg.content.find((b) => b.type === 'tool_use');
-  const input = block && 'input' in block ? block.input : {};
+export function extractLeaf(content: string): ExtractedLeaf {
+  const prose = stripLeafTail(content);
+  const open = content.indexOf(LEAF_OPEN);
+  const close = content.indexOf(LEAF_CLOSE, open + LEAF_OPEN.length);
+  if (open !== -1 && close !== -1) {
+    const json = content.slice(open + LEAF_OPEN.length, close).trim();
+    try {
+      const output = normalizeLeaf(JSON.parse(json));
+      if (!output.summary) output.summary = proseSummary(prose);
+      return { prose, output, hadBlock: true };
+    } catch {
+      /* malformed JSON → fall through to the prose fallback */
+    }
+  }
   return {
-    output: parseLeafToolInput(input),
-    inTokens: msg.usage?.input_tokens ?? 0,
-    outTokens: msg.usage?.output_tokens ?? 0,
-    stopReason: msg.stop_reason ?? null,
+    prose,
+    output: { summary: proseSummary(prose), confidence: 0.5, findings: [], citations: [] },
+    hadBlock: false,
   };
+}
+
+// First sentence (or up to 280 chars) of the prose, as a fallback summary.
+function proseSummary(prose: string): string {
+  const trimmed = prose.trim();
+  if (!trimmed) return '';
+  const m = trimmed.match(/^[\s\S]{0,280}?[.!?](\s|$)/);
+  return (m ? m[0] : trimmed.slice(0, 280)).trim();
 }

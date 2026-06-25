@@ -39,6 +39,12 @@ import { recordAndAllocate } from '../markets/portfolio';
 import { extractClaims } from '../claims/extract';
 import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
+// ── Elastic Workforce (P1) — all gated by isElastic(); off-path is untouched ──
+import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext } from '../elastic/p1';
+import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
+import { reserveBudget, recordArtifact } from '../elastic/ledger';
+import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE } from '../elastic/config';
+import type { LeafOutput } from '../elastic/types';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
 const DISCLAIMER = 'SELFHIVE does not provide investment advice or stock recommendations.';
@@ -112,6 +118,7 @@ export async function composeImpl(
   trainerHistory = '',
   reputationBlock = '',
   recallBlock = '',
+  userId: string | null = null,
 ) {
   const emit = await makeEmitter(runId);
   await emit('cos_start');
@@ -130,14 +137,35 @@ export async function composeImpl(
   const tb = cos.content.find((b) => b.type === 'text');
   const planRaw = tb && 'text' in tb ? tb.text : '';
 
-  const plan = parseTeamPlan(planRaw, customAgents);
-  if (!plan) throw new Error('Could not compose a valid team plan.');
-  plan.agents = applySpawner(plan.agents);
-  const cfo = governBudget(plan, { avgCostUsd: costByClass[plan.classification], ceilingUsd: DEFAULT_COST_CEILING_USD });
-  plan.agents = cfo.agents;
+  const elastic = isElastic();
+  let plan: TeamPlan | null;
+  let models: Record<string, string>;
+  let cfoNote: string;
+
+  if (elastic) {
+    // ELASTIC PATH: budget-governed wide squads. Raise the caps, assign models at
+    // the CTO floor, split the tier budget across roles (ROI×scope), and persist
+    // the node tree with per-node grants. Conservation is guaranteed by allocateGrants.
+    const tier = TIERS[resolveTier()];
+    plan = parseTeamPlan(planRaw, customAgents, { maxTeam: tier.maxAgents, maxFanout: 10 });
+    if (!plan) throw new Error('Could not compose a valid team plan.');
+    plan.agents = applySpawner(plan.agents);
+    models = Object.fromEntries(plan.agents.map((a) => [a.id, capabilityFloor(a)]));
+    const alloc = planElasticAllocation(plan.agents, {}, tier.capUsd, models);
+    await persistNodes(getAdminSupabase(), runId, userId, alloc.nodes);
+    cfoNote = alloc.note;
+  } else {
+    plan = parseTeamPlan(planRaw, customAgents);
+    if (!plan) throw new Error('Could not compose a valid team plan.');
+    plan.agents = applySpawner(plan.agents);
+    const cfo = governBudget(plan, { avgCostUsd: costByClass[plan.classification], ceilingUsd: DEFAULT_COST_CEILING_USD });
+    plan.agents = cfo.agents;
+    models = cfo.modelByAgent;
+    cfoNote = cfo.note;
+  }
 
   await emit('team_plan', { plan });
-  await emit('cfo_decision', { note: cfo.note });
+  await emit('cfo_decision', { note: cfoNote });
   const cost: StepCost = {
     in: cos.usage?.input_tokens ?? 0,
     out: cos.usage?.output_tokens ?? 0,
@@ -147,7 +175,7 @@ export async function composeImpl(
   // backfire loop is held under cost discipline.
   const avg = costByClass[plan.classification];
   const costMode = avg !== undefined && avg > DEFAULT_COST_CEILING_USD;
-  return { plan, models: cfo.modelByAgent, cost, costMode };
+  return { plan, models, cost, costMode };
 }
 
 // Shared per-agent execution — drives a set of agents in parallel, emitting the
@@ -163,8 +191,13 @@ async function executeAgents(
   customAgents: Record<string, Specialist>,
   bundle: ResourceBundle | undefined,
   overlaysByRole: Record<string, OverlayRow[]>,
+  // Elastic: append the [[LEAF]] structured-tail instruction and HIDE that tail
+  // from every emitted event so the streaming UI shows only prose (identical to
+  // today). The raw content (with tail) is returned for structured extraction.
+  elastic = false,
 ): Promise<AgentResult[]> {
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
+  const disp = (c: string) => (elastic ? stripLeafTail(c) : c);
   return Promise.all(agents.map(async (agent, idx) => {
     const color = LIBRARY[agent.role]?.color ?? customAgents[agent.role]?.color ?? COLORS[idx % COLORS.length];
     const model = modelOf(agent);
@@ -177,7 +210,7 @@ async function executeAgents(
       const stream = client.messages.stream({
         model, max_tokens: AGENT_MAX_TOKENS,
         system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
-        messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
+        messages: [{ role: 'user', content: buildAgentContext(problem, deps) + (elastic ? LEAF_PROMPT_SUFFIX : '') }],
         ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       });
       for await (const ev of stream) {
@@ -187,14 +220,14 @@ async function executeAgents(
         if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
           content += ev.delta.text;
           const now = Date.now();
-          if (now - lastFlush > 1200) { lastFlush = now; await emit('agent_content', { agentId: agent.id, content }); }
+          if (now - lastFlush > 1200) { lastFlush = now; await emit('agent_content', { agentId: agent.id, content: disp(content) }); }
         }
       }
     } catch (e) {
       content = content || `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
     }
-    await emit('agent_content', { agentId: agent.id, content });
-    await emit('agent_done', { agentId: agent.id, artifact: content });
+    await emit('agent_content', { agentId: agent.id, content: disp(content) });
+    await emit('agent_done', { agentId: agent.id, artifact: disp(content) });
     return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
   }));
 }
@@ -213,15 +246,89 @@ export async function runLayerImpl(
   // accumulated improvements. One DB query batched across the layer; respects the
   // kill switch.
   const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification);
-  const results = await executeAgents(emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent);
+  const elastic = isElastic();
+  const results = await executeAgents(emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent, elastic);
 
   const out: Record<string, { title: string; content: string }> = {};
   let cost: StepCost = { ...ZERO_COST };
-  results.forEach((r) => {
-    out[r.id] = { title: r.title, content: r.content };
+  const sb = elastic ? getAdminSupabase() : null;
+  for (const r of results) {
+    let content = r.content;
+    if (elastic && sb) {
+      // Split the streamed response into clean prose (the artifact the critic/synth
+      // /trainer read) and the structured [[LEAF]] block (for the reduce step).
+      const { prose, output } = extractLeaf(r.content);
+      content = prose;
+      try {
+        await recordArtifact(sb, { runId, nodeId: r.id, kind: 'leaf', content: prose, summary: output.summary, structured: output, tokens: r.out });
+        // Record actual spend against the node's grant (idempotent on the key).
+        await reserveBudget(sb, runId, r.id, `spend:${r.id}:${r.in}:${r.out}`, r.usd, 'leaf');
+      } catch { /* node bookkeeping never breaks a run */ }
+    }
+    out[r.id] = { title: r.title, content };
     cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
-  });
+  }
   return { outputs: out, cost };
+}
+
+// ─── STEP 2c (ELASTIC): reduce each squad → one briefing ──────────────
+// Collapses every fan-out squad (a role with >1 lane) into a single merged
+// briefing so the critic + synthesizer see bounded context as squads widen. The
+// TRAINER still scores the individual lanes (it gets the full per-lane outputs),
+// so this only changes what critic/synth consume. No UI events — purely internal.
+export async function reduceImpl(
+  runId: string,
+  plan: TeamPlan,
+  outputs: Record<string, { title: string; content: string }>,
+): Promise<{ outputs: Record<string, { title: string; content: string }>; cost: StepCost }> {
+  const squads = squadsByRole(plan.agents);
+  if (squads.size === 0) return { outputs, cost: { ...ZERO_COST } };
+
+  const sb = getAdminSupabase();
+  const leafOutputs = await readLeafOutputs(sb, runId);
+  const reduced: Record<string, { title: string; content: string }> = { ...outputs };
+  let cost: StepCost = { ...ZERO_COST };
+
+  for (const [role, laneAgents] of squads) {
+    const lanes = laneAgents
+      .filter((a) => outputs[a.id])
+      .map((a) => ({
+        title: a.title,
+        output:
+          leafOutputs[a.id] ??
+          ({ summary: outputs[a.id].content.slice(0, 280), confidence: 0.5, findings: [], citations: [] } as LeafOutput),
+      }));
+    if (lanes.length < 2) continue; // nothing to merge after failures
+
+    let merged = '';
+    try {
+      const resp = await client.messages.create({
+        model: MODEL_LEAD,
+        max_tokens: MAX_TOKENS_LEAD_REDUCE,
+        system: cachedSystem(SELFHIVE_DOCTRINE),
+        messages: [{ role: 'user', content: buildReduceContext(role, lanes) }],
+      });
+      const tb = resp.content.find((b) => b.type === 'text');
+      merged = tb && 'text' in tb ? tb.text : '';
+      cost = addCost(cost, {
+        in: resp.usage?.input_tokens ?? 0,
+        out: resp.usage?.output_tokens ?? 0,
+        usd: costUsd(MODEL_LEAD, resp.usage?.input_tokens ?? 0, resp.usage?.output_tokens ?? 0),
+      });
+    } catch {
+      continue; // merge failed → leave the raw lanes in place (graceful)
+    }
+    if (!merged) continue;
+
+    // Replace the squad's lanes with the single merged briefing.
+    for (const a of laneAgents) delete reduced[a.id];
+    const reducedId = `${role}__reduced`;
+    reduced[reducedId] = { title: `${laneAgents[0]?.title ?? role} — merged squad`, content: merged };
+    try {
+      await recordArtifact(sb, { runId, nodeId: reducedId, kind: 'reduce', content: merged, summary: merged.slice(0, 280), tokens: 0 });
+    } catch { /* bookkeeping */ }
+  }
+  return { outputs: reduced, cost };
 }
 
 // ─── STEP 2b: BACKFIRE — reactive mid-run reinforcement (the §10 loop) ──

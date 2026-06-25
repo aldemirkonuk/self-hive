@@ -146,8 +146,13 @@ function uniqueTitle(base: string, lane: string | undefined, laneIndex: number, 
  */
 export function parseTeamPlan(
   raw: string,
-  customAgents: Record<string, { systemPrompt: string; needsLiveData: boolean; title?: string }> = {}
+  customAgents: Record<string, { systemPrompt: string; needsLiveData: boolean; title?: string }> = {},
+  // Elastic path raises these (budget-governed squads); defaults preserve the
+  // exact legacy behavior, so the off-path is byte-identical.
+  caps: { maxTeam?: number; maxFanout?: number } = {}
 ): TeamPlan | null {
+  const maxTeam = caps.maxTeam ?? MAX_TEAM_SIZE;
+  const maxFanout = caps.maxFanout ?? MAX_FANOUT_PER_ROLE;
   // Strip any accidental code fences
   const cleaned = raw.replace(/```json\s*|\s*```/g, '').trim();
   // Extract the outermost JSON object
@@ -175,7 +180,7 @@ export function parseTeamPlan(
   const agents: PlannedAgent[] = [];
 
   for (const a of p.agents as Partial<PlannedAgent>[]) {
-    if (agents.length >= MAX_TEAM_SIZE) break;
+    if (agents.length >= maxTeam) break;
     if (!a.id || seenIds.has(a.id)) continue;
 
     // Identity key: explicit role, else the id itself (singleton → role === id).
@@ -185,7 +190,7 @@ export function parseTeamPlan(
     // lanes beyond the ceiling are dropped here (a second, budget-driven cap lives
     // in the CFO governor).
     const priorForRole = roleCount.get(role) ?? 0;
-    if (priorForRole >= MAX_FANOUT_PER_ROLE) continue;
+    if (priorForRole >= maxFanout) continue;
 
     const lib = LIBRARY[role];
     const custom = customAgents[role];

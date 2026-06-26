@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { relayShouldContinue, buildContinuationContext } from './relay.ts';
+import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from './relay.ts';
 import type { LeafOutput } from './types.ts';
 
 const leaf = (over: Partial<LeafOutput> = {}): LeafOutput => ({
@@ -48,4 +48,16 @@ test('buildContinuationContext: round 2+ compacts to the digest, drops raw prose
 test('buildContinuationContext: surfaces the coverage gap when present', () => {
   const ctx = buildContinuationContext('TASK', 'prose', leaf({ coverageGap: '40 of 100 names left' }), 1);
   assert.ok(ctx.includes('40 of 100 names left'));
+});
+
+test('buildCarryHeader: empty with no deps; lists upstream agents otherwise', () => {
+  assert.equal(buildCarryHeader([]), '');
+  const h = buildCarryHeader([
+    { title: 'Market Researcher', content: '# REPORT\nEnergy demand is rising into summer.' },
+    { title: 'Macro Analyst', content: 'Rates likely steady through Q3.' },
+  ]);
+  assert.ok(h.includes("From earlier agents' research"));
+  assert.ok(h.includes('Market Researcher'));
+  assert.ok(h.includes('Energy demand is rising into summer.')); // skips the leading # heading
+  assert.ok(h.includes('Macro Analyst'));
 });

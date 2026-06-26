@@ -24,6 +24,27 @@ export function relayShouldContinue(
 }
 
 /**
+ * A visible, auditable header an agent prepends to its output when it builds on
+ * earlier agents (its dependencies). Makes the cross-agent research transfer
+ * SHOW at the top of the tile — proof nothing was dropped on the handoff.
+ * Empty for first-layer agents (nothing earlier to carry).
+ */
+export function buildCarryHeader(deps: { title: string; content: string }[]): string {
+  if (!deps.length) return '';
+  const bullets = deps.map((d) => `* **${d.title}:** ${firstMeaningfulLine(d.content)}`).join('\n');
+  return `_From earlier agents' research:_\n${bullets}\n\n---\n\n`;
+}
+
+// First non-empty, non-heading line of a dep's output, trimmed — a one-line digest.
+function firstMeaningfulLine(content: string): string {
+  const line = content
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('---')) ?? '';
+  return line.length > 180 ? line.slice(0, 177) + '…' : line;
+}
+
+/**
  * Build the user message for a continuation round. Round 1 feeds the full prior
  * prose; round >= RELAY_COMPACT_FROM_ROUND feeds the COMPACTED digest (the
  * [[LEAF]] summary + findings) so the input window stays bounded no matter how

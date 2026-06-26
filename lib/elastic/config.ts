@@ -60,6 +60,11 @@ export const MAX_RELAY_ROUNDS = 3;            // continuation rounds per agent
 // Hard ABANDON ceiling per agent across all its rounds — a safety guard, not the
 // "continue" signal. A stuck/runaway agent is aborted, its partial kept, run goes on.
 export const AGENT_ABANDON_MS = 20 * 60_000;  // 20 minutes
+// The relay runs INSIDE one agent step, which is bounded by the function's ~300s
+// wall-clock. So the operative per-step deadline must leave margin under 300s —
+// the agent aborts and returns its partial instead of being killed + retried.
+// (The full 20-min span needs each round as its own step — a later refactor.)
+export const RELAY_STEP_BUDGET_MS = 240_000;  // 240s, ~60s margin under the 300s cap
 // Round at/after which the continuation context is COMPACTED (the [[LEAF]] summary
 // + findings replace the full prior text) so the input window stays bounded.
 export const RELAY_COMPACT_FROM_ROUND = 2;

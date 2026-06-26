@@ -43,8 +43,8 @@ import { isMarketsRun } from '../markets/util';
 import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext } from '../elastic/p1';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
 import { reserveBudget, recordArtifact } from '../elastic/ledger';
-import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS } from '../elastic/config';
-import { relayShouldContinue, buildContinuationContext } from '../elastic/relay';
+import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS } from '../elastic/config';
+import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
 import type { LeafOutput } from '../elastic/types';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
@@ -241,15 +241,23 @@ async function executeAgents(
     const system = cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? []));
     const hasTools = agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch;
     const startedAt = Date.now();
-    let content = ''; let lastFlush = 0; let round = 0;
+    // Within ONE agent step the relay is governed by the ~300s function cap, not
+    // the 20-min ceiling — abort with margin so the step returns its partial
+    // instead of being killed + retried. (Full 20-min span = per-round steps, later.)
+    const deadlineMs = Math.min(AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS);
+    // Visible, auditable carry-over: show what this agent inherited from earlier
+    // agents at the very top of its tile, then stream its own work beneath it.
+    let content = buildCarryHeader(deps);
+    let lastFlush = 0; let round = 0;
     let stopReason: string | null = null;
     let hadBlock = false;
     let leafOut: LeafOutput = { summary: '', confidence: 0, findings: [], citations: [] };
+    if (content) await emit('agent_content', { agentId: agent.id, content });
 
     while (true) {
       const userContent = round === 0 ? baseCtx + LEAF_PROMPT_SUFFIX : buildContinuationContext(baseCtx, content, leafOut, round);
-      const remaining = AGENT_ABANDON_MS - (Date.now() - startedAt);
-      if (remaining <= 0) break; // past the 20-min abandon ceiling
+      const remaining = deadlineMs - (Date.now() - startedAt);
+      if (remaining <= 0) break; // past the per-step relay budget
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), remaining);
       let roundText = ''; let roundIn = 0; let roundOut = 0;
@@ -284,7 +292,7 @@ async function executeAgents(
       leafOut = ex.output; hadBlock = ex.hadBlock;
       if (!relayShouldContinue(stopReason, leafOut, hadBlock)) break;
       if (round + 1 >= MAX_RELAY_ROUNDS) break;
-      if (Date.now() - startedAt >= AGENT_ABANDON_MS) break;
+      if (Date.now() - startedAt >= deadlineMs) break;
       content = ex.prose; // strip the checkpoint block so the next round appends clean prose
       round++;
     }

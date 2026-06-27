@@ -29,18 +29,28 @@ export function relayShouldContinue(
  * SHOW at the top of the tile — proof nothing was dropped on the handoff.
  * Empty for first-layer agents (nothing earlier to carry).
  */
+const CARRY_MARKER = "_From earlier agents' research:_";
+
 export function buildCarryHeader(deps: { title: string; content: string }[]): string {
   if (!deps.length) return '';
-  const bullets = deps.map((d) => `* **${d.title}:** ${firstMeaningfulLine(d.content)}`).join('\n');
-  return `_From earlier agents' research:_\n${bullets}\n\n---\n\n`;
+  const bullets = deps.map((d) => `* **${d.title}:** ${depDigest(d.content)}`).join('\n');
+  return `${CARRY_MARKER}\n${bullets}\n\n---\n\n`;
 }
 
-// First non-empty, non-heading line of a dep's output, trimmed — a one-line digest.
-function firstMeaningfulLine(content: string): string {
-  const line = content
+// A one-line digest of a dep's OWN research. Critically: strip any carry-over
+// block the dep itself inherited first, so we don't echo "From earlier agents'
+// research" recursively — then take its first real line (skip headings, dividers,
+// bullets, italics).
+function depDigest(content: string): string {
+  let c = content;
+  if (c.startsWith(CARRY_MARKER)) {
+    const i = c.indexOf('\n---');
+    if (i !== -1) c = c.slice(i + 4);
+  }
+  const line = c
     .split('\n')
     .map((l) => l.trim())
-    .find((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('---')) ?? '';
+    .find((l) => l.length > 0 && !/^[#*\-_>|]/.test(l)) ?? '';
   return line.length > 180 ? line.slice(0, 177) + '…' : line;
 }
 

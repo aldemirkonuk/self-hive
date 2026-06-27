@@ -61,3 +61,12 @@ test('buildCarryHeader: empty with no deps; lists upstream agents otherwise', ()
   assert.ok(h.includes('Energy demand is rising into summer.')); // skips the leading # heading
   assert.ok(h.includes('Macro Analyst'));
 });
+
+test('buildCarryHeader: digests a dep\'s OWN research, not its inherited header', () => {
+  // A dep that itself starts with a carry-over block must not echo the marker.
+  const depWithHeader = "_From earlier agents' research:_\n* **X:** something\n\n---\n\n# REPORT\nThe real finding is VLO refining margins expanding.";
+  const h = buildCarryHeader([{ title: 'Quant', content: depWithHeader }]);
+  const headerLines = h.split('\n').filter((l) => l.includes("From earlier agents' research"));
+  assert.equal(headerLines.length, 1, 'the marker must appear once (the top), not echoed in the bullet');
+  assert.ok(h.includes('VLO refining margins expanding.'));
+});

@@ -90,6 +90,69 @@ export function planElasticAllocation(
   };
 }
 
+// ── ROI priors (self-sustaining allocation) ──────────────────────────
+// The CFO learns where budget pays off. trainer_reports.scores are keyed by agent
+// TITLE (with lane suffixes), each with an `overall` 0-10. We average by the base
+// title (lane stripped) → a per-role "proven value" prior. Roles with no history
+// fall back to the mean of known roles, so newcomers aren't starved.
+
+/** Strip a lane suffix from a display title: "Quant Analyst — Momentum" → "Quant Analyst". */
+export function normalizeTitle(title: string): string {
+  return title.split(/\s[—–-]\s/)[0].trim();
+}
+
+/** Average historical `overall` score per base title, over the user's recent runs. */
+export async function loadRoiByTitle(sb: SupabaseClient, userId: string | null): Promise<Record<string, number>> {
+  if (!userId) return {};
+  const acc: Record<string, { sum: number; n: number }> = {};
+  try {
+    const { data: runRows } = await sb
+      .from('runs').select('id').eq('user_id', userId)
+      .order('created_at', { ascending: false }).limit(40);
+    const ids = (runRows ?? []).map((r) => r.id);
+    if (!ids.length) return {};
+    const { data } = await sb.from('trainer_reports').select('scores').in('run_id', ids);
+    for (const row of data ?? []) {
+      const scores = row.scores as Record<string, { overall?: number }> | null;
+      if (!scores) continue;
+      for (const [title, s] of Object.entries(scores)) {
+        const ov = typeof s?.overall === 'number' && Number.isFinite(s.overall) ? s.overall : null;
+        if (ov === null) continue;
+        const k = normalizeTitle(title);
+        acc[k] = acc[k] ?? { sum: 0, n: 0 };
+        acc[k].sum += ov;
+        acc[k].n += 1;
+      }
+    }
+  } catch {
+    return {}; // no history → neutral allocation
+  }
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(acc)) out[k] = v.sum / v.n;
+  return out;
+}
+
+/**
+ * PURE. Build a complete per-role ROI prior for the planned agents from the
+ * historical by-title averages. Every role gets a value: its own history if known,
+ * else the mean of known roles (or a neutral 7.0 if there's no history at all).
+ */
+export function roiByRoleFromTitles(agents: PlannedAgent[], roiByTitle: Record<string, number>): Record<string, number> {
+  const roles = [...new Set(agents.map((a) => a.role))];
+  const direct: Record<string, number | undefined> = {};
+  const known: number[] = [];
+  for (const role of roles) {
+    const rep = agents.find((a) => a.role === role)!;
+    const v = roiByTitle[normalizeTitle(rep.title)];
+    direct[role] = v;
+    if (v !== undefined) known.push(v);
+  }
+  const fallback = known.length ? known.reduce((s, x) => s + x, 0) / known.length : 7.0;
+  const out: Record<string, number> = {};
+  for (const role of roles) out[role] = direct[role] ?? fallback;
+  return out;
+}
+
 /** Roles that fanned out into a squad (>1 lane) → their lane ids. */
 export function squadsByRole(agents: PlannedAgent[]): Map<string, PlannedAgent[]> {
   const byRole = new Map<string, PlannedAgent[]>();

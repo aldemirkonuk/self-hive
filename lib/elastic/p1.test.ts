@@ -7,12 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { planElasticAllocation, squadsByRole, buildReduceContext } from './p1.ts';
+import { planElasticAllocation, squadsByRole, buildReduceContext, normalizeTitle, roiByRoleFromTitles } from './p1.ts';
 import type { PlannedAgent } from '../library/chief-of-staff.ts';
 import type { LeafOutput } from './types.ts';
 
 const agent = (id: string, role: string, lane?: string): PlannedAgent => ({
-  id, role, title: `${role} ${lane ?? ''}`.trim(), source: 'library',
+  id, role, title: lane ? `${role} — ${lane}` : role, source: 'library',
   taskContract: 't', successCriteria: 's', dependsOn: [], needsLiveData: false,
   lane,
 });
@@ -74,6 +74,32 @@ test('squadsByRole: only roles with >1 lane', () => {
   assert.ok(squads.has('quant'));
   assert.equal(squads.get('quant')!.length, 2);
   assert.ok(!squads.has('macro'));
+});
+
+test('normalizeTitle: strips lane suffixes', () => {
+  assert.equal(normalizeTitle('Quant Analyst — Momentum'), 'Quant Analyst');
+  assert.equal(normalizeTitle('Risk Analyst - Cross-Asset'), 'Risk Analyst');
+  assert.equal(normalizeTitle('Financial Advisor'), 'Financial Advisor');
+});
+
+test('roiByRoleFromTitles: known roles get their history; unknown get the mean', () => {
+  const agents = [
+    agent('quant', 'quant', 'A'), agent('quant_2', 'quant', 'B'), // title base "quant "
+    agent('macro', 'macro'),
+    agent('newbie', 'newbie'),
+  ];
+  // history keyed by base title (agent() builds title = "role lane".trim() → "quant", "macro", "newbie")
+  const roi = roiByRoleFromTitles(agents, { quant: 9, macro: 5 });
+  assert.equal(roi.quant, 9);
+  assert.equal(roi.macro, 5);
+  assert.equal(roi.newbie, 7); // no history → mean of known (9,5)=7, not starved
+});
+
+test('roiByRoleFromTitles: no history at all → neutral 7.0 everywhere', () => {
+  const agents = [agent('quant', 'quant'), agent('macro', 'macro')];
+  const roi = roiByRoleFromTitles(agents, {});
+  assert.equal(roi.quant, 7.0);
+  assert.equal(roi.macro, 7.0);
 });
 
 test('buildReduceContext: includes role, lane titles, and findings', () => {

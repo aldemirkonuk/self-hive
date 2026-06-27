@@ -40,9 +40,9 @@ import { extractClaims } from '../claims/extract';
 import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
 // ── Elastic Workforce (P1) — all gated by isElastic(); off-path is untouched ──
-import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext } from '../elastic/p1';
+import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext, loadRoiByTitle, roiByRoleFromTitles } from '../elastic/p1';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
-import { reserveBudget, recordArtifact } from '../elastic/ledger';
+import { reserveBudget, recordArtifact, setNodeStatus } from '../elastic/ledger';
 import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS } from '../elastic/config';
 import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
 import type { LeafOutput } from '../elastic/types';
@@ -152,8 +152,11 @@ export async function composeImpl(
     if (!plan) throw new Error('Could not compose a valid team plan.');
     plan.agents = applySpawner(plan.agents);
     models = Object.fromEntries(plan.agents.map((a) => [a.id, capabilityFloor(a)]));
-    const alloc = planElasticAllocation(plan.agents, {}, tier.capUsd, models);
-    await persistNodes(getAdminSupabase(), runId, userId, alloc.nodes);
+    // ROI learning: weight the budget toward roles that have proven valuable.
+    const sbCompose = getAdminSupabase();
+    const roiByRole = roiByRoleFromTitles(plan.agents, await loadRoiByTitle(sbCompose, userId));
+    const alloc = planElasticAllocation(plan.agents, roiByRole, tier.capUsd, models);
+    await persistNodes(sbCompose, runId, userId, alloc.nodes);
     cfoNote = alloc.note;
   } else {
     plan = parseTeamPlan(planRaw, customAgents);
@@ -334,6 +337,7 @@ export async function runLayerImpl(
         await recordArtifact(sb, { runId, nodeId: r.id, kind: 'leaf', content: prose, summary: output.summary, structured: output, tokens: r.out });
         // Record actual spend against the node's grant (idempotent on the key).
         await reserveBudget(sb, runId, r.id, `spend:${r.id}:${r.in}:${r.out}`, r.usd, 'leaf');
+        await setNodeStatus(sb, runId, r.id, 'done'); // planned → done (for the tree viewer)
       } catch { /* node bookkeeping never breaks a run */ }
     }
     out[r.id] = { title: r.title, content };

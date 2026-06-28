@@ -69,6 +69,11 @@ export const RELAY_STEP_BUDGET_MS = 240_000;  // 240s, ~60s margin under the 300
 // + findings replace the full prior text) so the input window stays bounded.
 export const RELAY_COMPACT_FROM_ROUND = 2;
 
+// SUB-TEAM FOLD (Way 1 recursion): a squad (role fanned into >1 lane) runs as a
+// LEAD (lane 0, the visible tile) + sub-agents (the rest) that run suppressed and
+// fold into the lead's single tile. Max sub-agents run in parallel per lead.
+export const SUBTEAM_MAX = 8;
+
 // Model tiers. Haiku does the wide leaf work; Sonnet leads, critiques, reduces
 // and synthesizes; Opus only synthesizes flagship runs.
 export const MODEL_LEAF = 'claude-haiku-4-5';

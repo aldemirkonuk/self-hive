@@ -41,15 +41,26 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     let outputs: Outputs = {};
     for (let i = 0; i < layers.length; i++) {
       if (elastic) {
-        // agentStep: each agent runs as its OWN durable step (own 300s slot,
-        // crash-isolated, runs its own continuation relay), parallel within the
-        // layer. layerStep already handles a single-agent array, so we reuse it.
-        const results = await Promise.all(
-          layers[i].map((a) => layerStep(
-            input.runId, input.problem, [a], outputs, models, input.customAgents, input.resourceBundle,
-            input.userId, plan.classification,
-          )),
-        );
+        // Each agent runs as its OWN durable step. A SQUAD (a role with >1 lane)
+        // folds (Way 1): lane 0 is the visible lead, the rest run suppressed and
+        // fold into its single tile via leadStep. Singletons use layerStep([a]).
+        const byRole = new Map<string, PlannedAgent[]>();
+        for (const a of layers[i]) {
+          const arr = byRole.get(a.role) ?? [];
+          arr.push(a);
+          byRole.set(a.role, arr);
+        }
+        const results = await Promise.all([...byRole.values()].map((lanes) =>
+          lanes.length > 1
+            ? leadStep(
+                input.runId, input.problem, lanes[0], lanes.slice(1), outputs, models,
+                input.customAgents, input.resourceBundle, input.userId, plan.classification,
+              )
+            : layerStep(
+                input.runId, input.problem, [lanes[0]], outputs, models, input.customAgents,
+                input.resourceBundle, input.userId, plan.classification,
+              ),
+        ));
         for (const res of results) {
           outputs = { ...outputs, ...res.outputs };
           total = sum(total, res.cost);
@@ -110,6 +121,17 @@ async function composeStep(runId: string, problem: string, customAgents: Record<
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
   return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '', userId ?? null);
+}
+// ELASTIC (Way 1): a folded squad — lead (lane 0) + suppressed sub-team that
+// folds into the lead's single tile. Its own durable step.
+async function leadStep(
+  runId: string, problem: string, lead: PlannedAgent, subLanes: PlannedAgent[], prior: Outputs,
+  models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
+  userId?: string | null, classification?: string,
+) {
+  'use step';
+  const { runLeadImpl } = await import('@/lib/jobs/step-impl');
+  return runLeadImpl(runId, problem, lead, subLanes, prior, models, customAgents, bundle, userId ?? null, classification ?? null);
 }
 // ELASTIC (P1): reduce squads → bounded context for critic/synth. Pass-through
 // when the flag is off, so the off-path is unchanged.

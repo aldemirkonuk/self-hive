@@ -44,8 +44,9 @@ import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRo
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
 import { reserveBudget, recordArtifact, setNodeStatus, readDailySpent, bumpDailySpent } from '../elastic/ledger';
 import { backpressureFactor } from '../elastic/cfo';
-import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS } from '../elastic/config';
+import { TIERS, MODEL_LEAD, MODEL_LEAF, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS, SUBTEAM_MAX } from '../elastic/config';
 import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
+import { buildSubteamHeader, buildSubteamContext, buildSubAgentPrompt, type SubResult } from '../elastic/subteam';
 import type { LeafOutput } from '../elastic/types';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
@@ -206,6 +207,9 @@ async function executeAgents(
   // from every emitted event so the streaming UI shows only prose (identical to
   // today). The raw content (with tail) is returned for structured extraction.
   elastic = false,
+  // Way 1 fold: a lead's sub-team results — `header` shown atop its tile, `context`
+  // injected into its prompt to synthesize from. Only ever set for a single lead.
+  leadPreface?: { header: string; context: string },
 ): Promise<AgentResult[]> {
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
   return Promise.all(agents.map(async (agent, idx) => {
@@ -255,9 +259,10 @@ async function executeAgents(
     // the 20-min ceiling — abort with margin so the step returns its partial
     // instead of being killed + retried. (Full 20-min span = per-round steps, later.)
     const deadlineMs = Math.min(AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS);
-    // Visible, auditable carry-over: show what this agent inherited from earlier
-    // agents at the very top of its tile, then stream its own work beneath it.
-    let content = buildCarryHeader(deps);
+    // Visible, auditable carry-over: what this agent inherited from earlier agents
+    // (deps), plus — if it's a lead — its folded sub-team's findings. Both shown at
+    // the top of its single tile, then it streams its own synthesis beneath.
+    let content = buildCarryHeader(deps) + (leadPreface?.header ?? '');
     let lastFlush = 0; let round = 0;
     let stopReason: string | null = null;
     let hadBlock = false;
@@ -265,7 +270,8 @@ async function executeAgents(
     if (content) await emit('agent_content', { agentId: agent.id, content });
 
     while (true) {
-      const userContent = round === 0 ? baseCtx + LEAF_PROMPT_SUFFIX : buildContinuationContext(baseCtx, content, leafOut, round);
+      const round0Ctx = baseCtx + (leadPreface?.context ? `\n\n--- YOUR SUB-TEAM'S FINDINGS (synthesize these, don't repeat them) ---\n${leadPreface.context}` : '') + LEAF_PROMPT_SUFFIX;
+      const userContent = round === 0 ? round0Ctx : buildContinuationContext(baseCtx, content, leafOut, round);
       const remaining = deadlineMs - (Date.now() - startedAt);
       if (remaining <= 0) break; // past the per-step relay budget
       const ac = new AbortController();
@@ -351,6 +357,65 @@ export async function runLayerImpl(
     cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
   }
   return { outputs: out, cost };
+}
+
+// ─── STEP 2d (ELASTIC, Way 1): a LEAD with a folded sub-team ───────────
+// A squad becomes one visible tile: the lead (lane 0) runs normally, while the
+// other lanes run SUPPRESSED (no tiles), in parallel, and fold into the lead —
+// their findings show as a "From my sub-team:" header and are synthesized by the
+// lead. The whole sub-tree presents as the lead's single tile. UI is unchanged.
+export async function runLeadImpl(
+  runId: string, problem: string, lead: PlannedAgent, subLanes: PlannedAgent[],
+  priorOutputs: Record<string, { title: string; content: string }>,
+  models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
+  userId: string | null = null, classification: string | null = null,
+) {
+  const emit = await makeEmitter(runId);
+
+  // 1. Sub-lanes run suppressed (no UI events), in parallel, structured.
+  const lanes = subLanes.slice(0, SUBTEAM_MAX);
+  const subResults = await Promise.all(lanes.map(async (s): Promise<SubResult & { in: number; out: number }> => {
+    const label = s.lane ?? s.title;
+    try {
+      const resp = await client.messages.create({
+        model: MODEL_LEAF, max_tokens: AGENT_MAX_TOKENS,
+        system: cachedSystem(SELFHIVE_DOCTRINE),
+        messages: [{ role: 'user', content: buildSubAgentPrompt(lead.taskContract, label, s.taskContract) }],
+      });
+      const tb = resp.content.find((b) => b.type === 'text');
+      const { output } = extractLeaf(tb && 'text' in tb ? tb.text : '');
+      return { lane: label, output, in: resp.usage?.input_tokens ?? 0, out: resp.usage?.output_tokens ?? 0 };
+    } catch {
+      return { lane: label, output: { summary: '(sub-agent unavailable)', confidence: 0, findings: [], citations: [] }, in: 0, out: 0 };
+    }
+  }));
+  const simple: SubResult[] = subResults.map((r) => ({ lane: r.lane, output: r.output }));
+  const subIn = subResults.reduce((s, r) => s + r.in, 0);
+  const subOut = subResults.reduce((s, r) => s + r.out, 0);
+  const subUsd = costUsd(MODEL_LEAF, subIn, subOut);
+
+  // 2. The lead runs as the single visible tile, folding the sub-team's findings.
+  const overlays = await loadActiveOverlaysForAgents(userId, [lead.role], classification);
+  const results = await executeAgents(
+    emit, problem, [lead], priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5',
+    customAgents, bundle, overlays, true,
+    { header: buildSubteamHeader(simple), context: buildSubteamContext(simple) },
+  );
+  const r = results[0];
+  const { prose, output } = extractLeaf(r.content);
+
+  const sb = getAdminSupabase();
+  try {
+    await recordArtifact(sb, { runId, nodeId: r.id, kind: 'leaf', content: prose, summary: output.summary, structured: output, tokens: r.out + subOut });
+    await reserveBudget(sb, runId, r.id, `spend:${r.id}:${r.in + subIn}:${r.out + subOut}`, r.usd + subUsd, 'lead+subteam');
+    await setNodeStatus(sb, runId, r.id, 'done');
+    for (const s of lanes) await setNodeStatus(sb, runId, s.id, 'done'); // sub-lanes folded → done
+  } catch { /* bookkeeping never breaks a run */ }
+
+  return {
+    outputs: { [r.id]: { title: r.title, content: prose } } as Record<string, { title: string; content: string }>,
+    cost: { usd: r.usd + subUsd, in: r.in + subIn, out: r.out + subOut } as StepCost,
+  };
 }
 
 // ─── STEP 2c (ELASTIC): reduce each squad → one briefing ──────────────

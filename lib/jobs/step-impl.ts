@@ -42,7 +42,8 @@ import { isMarketsRun } from '../markets/util';
 // ── Elastic Workforce (P1) — all gated by isElastic(); off-path is untouched ──
 import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext, loadRoiByTitle, roiByRoleFromTitles } from '../elastic/p1';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
-import { reserveBudget, recordArtifact, setNodeStatus } from '../elastic/ledger';
+import { reserveBudget, recordArtifact, setNodeStatus, readDailySpent, bumpDailySpent } from '../elastic/ledger';
+import { backpressureFactor } from '../elastic/cfo';
 import { TIERS, MODEL_LEAD, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS } from '../elastic/config';
 import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
 import type { LeafOutput } from '../elastic/types';
@@ -155,7 +156,13 @@ export async function composeImpl(
     // ROI learning: weight the budget toward roles that have proven valuable.
     const sbCompose = getAdminSupabase();
     const roiByRole = roiByRoleFromTitles(plan.agents, await loadRoiByTitle(sbCompose, userId));
-    const alloc = planElasticAllocation(plan.agents, roiByRole, tier.capUsd, models);
+    // Daily-cap backpressure: tighten the run budget as the day's spend nears the cap.
+    let budget = tier.capUsd;
+    if (userId) {
+      const daily = await readDailySpent(sbCompose, userId, new Date().toISOString().slice(0, 10));
+      budget = tier.capUsd * backpressureFactor(daily.spentUsd, daily.capUsd);
+    }
+    const alloc = planElasticAllocation(plan.agents, roiByRole, budget, models);
     await persistNodes(sbCompose, runId, userId, alloc.nodes);
     cfoNote = alloc.note;
   } else {
@@ -693,6 +700,11 @@ export async function finalizeImpl(
       });
       await emit('run_cost', { note: `$${totalCost.usd.toFixed(3)} · ${totalCost.in.toLocaleString()} in / ${totalCost.out.toLocaleString()} out` });
     } catch { /* non-fatal */ }
+    // Elastic: roll this run's spend into the daily total so backpressure tightens
+    // future runs as the day's cap fills. Best-effort; never breaks finalize.
+    if (isElastic()) {
+      try { await bumpDailySpent(sb, userId, new Date().toISOString().slice(0, 10), totalCost.usd); } catch { /* non-fatal */ }
+    }
   }
 
   // Parse once — both the trainer-report row and the self-staffing loop need it.

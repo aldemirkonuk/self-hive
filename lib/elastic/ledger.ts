@@ -126,6 +126,31 @@ export async function recordArtifact(sb: SupabaseClient, a: NodeArtifact): Promi
   if (error) throw new Error(`recordArtifact(${a.nodeId}): ${error.message}`);
 }
 
+/**
+ * Add a run's spend to the user's daily total (read-modify-write upsert). Not
+ * strictly atomic, but autonomous runs are serialized by the cron concurrency
+ * group, and daily-cap backpressure is a soft signal — small drift is harmless.
+ */
+export async function bumpDailySpent(
+  sb: SupabaseClient,
+  userId: string,
+  day: string, // 'YYYY-MM-DD'
+  deltaUsd: number,
+): Promise<void> {
+  const { data } = await sb
+    .from('daily_budget')
+    .select('spent_usd, cap_usd')
+    .eq('user_id', userId)
+    .eq('day', day)
+    .maybeSingle();
+  const spent = Number(data?.spent_usd ?? 0) + deltaUsd;
+  const cap = Number(data?.cap_usd ?? DAILY_CAP_USD);
+  const { error } = await sb
+    .from('daily_budget')
+    .upsert({ user_id: userId, day, spent_usd: spent, cap_usd: cap, updated_at: new Date().toISOString() }, { onConflict: 'user_id,day' });
+  if (error) throw new Error(`bumpDailySpent: ${error.message}`);
+}
+
 /** Read a user's spend + cap for a day (for backpressure / the breaker). */
 export async function readDailySpent(
   sb: SupabaseClient,

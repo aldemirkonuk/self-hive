@@ -243,6 +243,11 @@ function OverlayRowView({ overlay, pending, onToggle }: { overlay: OverlayRow; p
           {overlay.advice_text}
         </span>
         <span style={{ fontSize: '0.48rem', letterSpacing: '0.06em', color: 'var(--text-dim)' }}>
+          {(overlay.reinforcement_count ?? 1) > 1 && (
+            <span title="This lesson was independently re-derived on later runs — recurrence is the learning signal" style={{ color: '#f59e0b' }}>
+              {`reinforced ×${overlay.reinforcement_count} · `}
+            </span>
+          )}
           {overlay.classification ? `${overlay.classification} · ` : ''}
           {overlay.source_score != null ? `score ${overlay.source_score.toFixed(1)} · ` : ''}
           {created.toLocaleDateString()} {created.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}

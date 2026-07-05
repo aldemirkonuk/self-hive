@@ -19,7 +19,15 @@ import type { OverlayRow } from '../db/overlays';
 // same pin threshold. The leading '__' can't be produced by the CoS's kebab role ids.
 export const ANTIBODY_AGENT_ID = '__critic_antibody';
 
-export function immunizerSystemPrompt(): string {
+/** Antibodies already in the hive's immune memory — injected so the immunizer
+ *  never re-derives an existing screen (write-time dedup also catches this, but
+ *  telling the model up front spends its budget on genuinely NEW patterns). */
+function existingAntibodiesBlock(existing: string[]): string {
+  if (existing.length === 0) return '';
+  return `\n\nANTIBODIES ALREADY IN IMMUNE MEMORY — the critic already screens for these. NEVER restate or rephrase one; only emit a genuinely NEW failure pattern:\n${existing.map((a) => `  - ${a}`).join('\n')}`;
+}
+
+export function immunizerSystemPrompt(existingAntibodies: string[] = []): string {
   return `You are the SELFHIVE IMMUNE SYSTEM. You read the CRITIC's red-team critique of a run and extract durable ANTIBODIES — generalizable failure PATTERNS the hive should screen every FUTURE run for. You turn one critique into permanent immune memory.
 
 Your output is a JSON array. Nothing else. No prose, no markdown fences.
@@ -49,7 +57,7 @@ HARD RULES — reject your own draft if it violates any:
 GOOD: "Flag any quantitative claim presented without a source or recency stamp."
 BAD:  "The quant cited Tesla's P/E without a date."
 GOOD: "Screen for conclusions stated at high confidence while their supporting evidence was called thin or estimated."
-BAD:  "The advisor was too sure about the rate-cut call."
+BAD:  "The advisor was too sure about the rate-cut call."${existingAntibodiesBlock(existingAntibodies)}
 
 Output the JSON array now. Empty array [] is valid.`;
 }

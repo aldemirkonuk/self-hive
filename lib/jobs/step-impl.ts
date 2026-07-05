@@ -26,7 +26,7 @@ import { synthesizerSystemPrompt, buildSynthesizerContext } from '../library/syn
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from '../trainer/dynamic-trainer';
 import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable } from '../library/distiller';
 import { immunizerSystemPrompt, formatAntibodiesForPrompt, ANTIBODY_AGENT_ID } from '../library/immunizer';
-import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, type OverlayRow } from '../db/overlays';
+import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, listActiveAdviceForRoles, type OverlayRow } from '../db/overlays';
 import { getUserSettingsAdmin } from '../db/settings';
 import { loadFounderManifest, loadCanonFor } from '../canon-loader';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
@@ -332,7 +332,7 @@ export async function runLayerImpl(
   // query by the layer's DISTINCT roles — every lane of a squad inherits the same
   // accumulated improvements. One DB query batched across the layer; respects the
   // kill switch.
-  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification);
+  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification, problem);
   const elastic = isElastic();
   const results = await executeAgents(emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent, elastic);
 
@@ -395,7 +395,7 @@ export async function runLeadImpl(
   const subUsd = costUsd(MODEL_LEAF, subIn, subOut);
 
   // 2. The lead runs as the single visible tile, folding the sub-team's findings.
-  const overlays = await loadActiveOverlaysForAgents(userId, [lead.role], classification);
+  const overlays = await loadActiveOverlaysForAgents(userId, [lead.role], classification, problem);
   const results = await executeAgents(
     emit, problem, [lead], priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5',
     customAgents, bundle, overlays, true,
@@ -530,7 +530,7 @@ export async function reinforceImpl(
   if (newAgents.length === 0) return { outputs: cleaned, newAgents: [], cost };
 
   // 4. Execute the reinforcements as one layer (deps may point at existing outputs).
-  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(newAgents.map((a) => a.role))], classification);
+  const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(newAgents.map((a) => a.role))], classification, problem);
   const results = await executeAgents(emit, problem, newAgents, { ...outputs, ...cleaned }, (a) => capabilityFloor(a), customAgents, bundle, overlaysByAgent);
 
   const merged: Record<string, { title: string; content: string }> = { ...cleaned };
@@ -554,7 +554,7 @@ export async function criticImpl(
   const criticEffect = effectFor(bundle, 'critic');
   // HIVE IMMUNE SYSTEM: load the critic's antibodies — failure patterns distilled from
   // past critiques — and inject them so it red-teams WITH MEMORY (respects the kill switch).
-  const antibodyMap = await loadActiveOverlaysForAgents(userId, [ANTIBODY_AGENT_ID], classification);
+  const antibodyMap = await loadActiveOverlaysForAgents(userId, [ANTIBODY_AGENT_ID], classification, problem);
   const immuneMemory = formatAntibodiesForPrompt(antibodyMap[ANTIBODY_AGENT_ID] ?? []);
   let critique = ''; let inTok = 0; let outTok = 0;
   const stream = client.messages.stream({
@@ -662,13 +662,26 @@ export async function distillImpl(
   const settings = await getUserSettingsAdmin(userId);
   if (!settings.autoMutateEnabled) return { inserted: 0, promoted: 0, skipped: true };
 
+  // Memory-aware distillation: the distiller sees each role's learnings already
+  // on file (so it never re-derives them) and the founder's mission (so new
+  // overlays steer agents toward it). Both best-effort — empty on any failure.
+  let existingByAgent: Record<string, string[]> = {};
+  try {
+    existingByAgent = await listActiveAdviceForRoles(userId, [...new Set(planAgents.map((a) => a.role))]);
+  } catch { /* memory context never blocks distillation */ }
+
   let parsed = '';
   try {
     const resp = await client.messages.create({
       model: 'claude-haiku-4-5', max_tokens: 1024,
       // The distiller attributes advice against the INSTANCE roster (so it can map
       // each lane's trainer block to an id); storage is remapped to role below.
-      system: cachedSystem(distillerSystemPrompt(planAgents.map((a) => ({ id: a.id, title: a.title })))),
+      // Existing learnings are keyed by ROLE — the distiller treats them as
+      // covered for every lane of that role.
+      system: cachedSystem(distillerSystemPrompt(
+        planAgents.map((a) => ({ id: a.id, title: a.title })),
+        { existingByAgent, founderMission: loadFounderManifest() },
+      )),
       messages: [{ role: 'user', content: `TRAINER REPORT (just delivered):\n\n${trainerReport}\n\nEmit the JSON array now.` }],
     });
     const tb = resp.content.find((b) => b.type === 'text');
@@ -696,9 +709,12 @@ export async function distillImpl(
     return [{ ...it, agentId: role }];
   });
 
-  const inserted = await insertOverlays(userId, runId, classification, finalItems);
-  const promoted = inserted > 0 ? await promotePinsForUser(userId, classification) : 0;
-  return { inserted, promoted, skipped: false };
+  // Write with semantic dedup: a re-derived lesson reinforces the existing row
+  // (and can pin it) instead of inserting a near-duplicate. The problem text
+  // becomes each new overlay's retrieval key (context embedding).
+  const res = await insertOverlays(userId, runId, classification, finalItems, problem);
+  const promoted = (res.inserted + res.reinforced) > 0 ? await promotePinsForUser(userId, classification) : 0;
+  return { inserted: res.inserted, promoted: promoted + res.pinnedByReinforcement, skipped: false };
 }
 
 // ─── STEP 6b: IMMUNIZE — distill the critic's critique into hive ANTIBODIES ──
@@ -719,11 +735,19 @@ export async function immunizeImpl(
   const settings = await getUserSettingsAdmin(userId);
   if (!settings.autoMutateEnabled) return { inserted: 0, promoted: 0, skipped: true };
 
+  // Memory-aware immunization: the immunizer sees the antibodies already in
+  // immune memory so it spends its budget on genuinely NEW failure patterns.
+  let existingAntibodies: string[] = [];
+  try {
+    const existing = await listActiveAdviceForRoles(userId, [ANTIBODY_AGENT_ID]);
+    existingAntibodies = existing[ANTIBODY_AGENT_ID] ?? [];
+  } catch { /* memory context never blocks immunization */ }
+
   let parsed = '';
   try {
     const resp = await client.messages.create({
       model: 'claude-haiku-4-5', max_tokens: 1024,
-      system: cachedSystem(immunizerSystemPrompt()),
+      system: cachedSystem(immunizerSystemPrompt(existingAntibodies)),
       messages: [{ role: 'user', content: `CRITIC'S RED-TEAM CRITIQUE (just delivered):\n\n${critique}\n\nEmit the antibody JSON array now.` }],
     });
     const tb = resp.content.find((b) => b.type === 'text');
@@ -743,9 +767,9 @@ export async function immunizeImpl(
     return [{ ...it, agentId: ANTIBODY_AGENT_ID }];
   });
 
-  const inserted = await insertOverlays(userId, runId, classification, antibodies);
-  const promoted = inserted > 0 ? await promotePinsForUser(userId, classification) : 0;
-  return { inserted, promoted, skipped: false };
+  const res = await insertOverlays(userId, runId, classification, antibodies, problem);
+  const promoted = (res.inserted + res.reinforced) > 0 ? await promotePinsForUser(userId, classification) : 0;
+  return { inserted: res.inserted, promoted: promoted + res.pinnedByReinforcement, skipped: false };
 }
 
 // ─── STEP 7: finalize — persist scores, cost, allocate paper capital, close out ──

@@ -33,7 +33,33 @@ const RUBRIC_TO_CATEGORY: Record<string, DistillerCategory> = {
   actionability: 'OUTPUT_DECISIVENESS',
 };
 
-export function distillerSystemPrompt(planAgents: { id: string; title: string }[]): string {
+/** Existing learnings per agent id (advice already on file), so the distiller
+ *  never re-derives them; and the founder's mission so every new overlay steers
+ *  agents toward it. Both optional — empty means the block is omitted. */
+export interface DistillerContext {
+  existingByAgent?: Record<string, string[]>;
+  founderMission?: string;
+}
+
+export function existingLearningsBlock(existingByAgent: Record<string, string[]> | undefined): string {
+  const entries = Object.entries(existingByAgent ?? {}).filter(([, v]) => v.length > 0);
+  if (entries.length === 0) return '';
+  const body = entries
+    .map(([id, advice]) => `  ${id}:\n${advice.map((a) => `    - ${a}`).join('\n')}`)
+    .join('\n');
+  return `\n\nLEARNINGS ALREADY ON FILE — these are ALREADY injected into each agent's prompt. NEVER restate, rephrase, or narrow one of these; if a weakness is already covered below, SKIP it. Only emit an overlay that teaches something genuinely NEW:\n${body}`;
+}
+
+export function missionBlock(founderMission: string | undefined): string {
+  const m = (founderMission ?? '').trim();
+  if (!m) return '';
+  return `\n\nFOUNDER MISSION (the company's north star — every overlay you emit must make the agent MORE effective at serving this with less wasted work; drop any draft that doesn't):\n${m.slice(0, 1500)}`;
+}
+
+export function distillerSystemPrompt(
+  planAgents: { id: string; title: string }[],
+  ctx: DistillerContext = {},
+): string {
   const roster = planAgents.map((a) => `  - id="${a.id}" title="${a.title}"`).join('\n');
   return `You are the SELFHIVE DISTILLER. You read a TRAINER's narrative report and emit structured, GENERALIZABLE improvement overlays per agent — improvements that will be silently appended to that agent's system prompt on every future run.
 
@@ -71,7 +97,7 @@ GENERALIZABILITY EXAMPLES:
   GOOD: "After stating a conclusion, write one sentence describing what evidence would prove it wrong."
   BAD:  "When questioning the rate cut thesis, mention BOJ policy."
   GOOD: "Lead with your decision, then the reasoning — not the reverse."
-  BAD:  "For overweight/underweight calls, recommend overweight."
+  BAD:  "For overweight/underweight calls, recommend overweight."${missionBlock(ctx.founderMission)}${existingLearningsBlock(ctx.existingByAgent)}
 
 Output JSON array. Empty array [] is valid (nothing to improve).`;
 }

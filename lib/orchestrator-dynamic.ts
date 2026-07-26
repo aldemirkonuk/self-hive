@@ -1,4 +1,6 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropic, callModel, isAIEnabled, AIDisabledError } from '@/lib/ai/client';
+import { costUsd } from '@/lib/cost/pricing';
+import { recordCall } from '@/lib/cost/meter';
 import { LIBRARY, Specialist } from './library/specialists';
 import {
   chiefOfStaffSystemPrompt,
@@ -24,22 +26,6 @@ import { loadFounderManifest, loadCanonFor } from './canon-loader';
 import { SELFHIVE_DOCTRINE } from './doctrine';
 import { DynamicRunEvent, AgentRole } from './types';
 import { ResourceBundle, effectFor } from './resources/runtime';
-
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-// maxRetries: the SDK retries 429 (rate limit) + 529 (overloaded) + 5xx with
-// exponential backoff. High value = runs ride through transient rate limiting
-// instead of failing. This is what makes a run reliably complete.
-const client = new Anthropic({ apiKey: ANTHROPIC_KEY, maxRetries: 6, timeout: 120_000 });
-
-// Approx Anthropic pricing ($ per 1M tokens) for CFO cost accounting.
-const PRICING: Record<string, { in: number; out: number }> = {
-  'claude-sonnet-4-5': { in: 3, out: 15 },
-  'claude-haiku-4-5': { in: 1, out: 5 },
-};
-export function costUsd(model: string, inTok: number, outTok: number): number {
-  const p = PRICING[model] ?? PRICING['claude-sonnet-4-5'];
-  return (inTok * p.in + outTok * p.out) / 1_000_000;
-}
 
 const DISCLAIMER = 'SELFHIVE does not provide investment advice or stock recommendations.';
 
@@ -115,10 +101,11 @@ async function* streamAgent(
   userContent: string,
   useWebSearch: boolean,
   model: string,
+  meterCtx: { runId?: string | null; userId?: string | null; role: string; phase: string },
   signal?: AbortSignal
 ): AsyncGenerator<DynamicRunEvent & { _final?: string; _in?: number; _out?: number }> {
   let full = '';
-  const stream = client.messages.stream(
+  const stream = getAnthropic().messages.stream(
     {
       model,
       max_tokens: AGENT_MAX_TOKENS,
@@ -147,6 +134,13 @@ async function* streamAgent(
       yield { type: 'agent_delta', agentId, delta: event.delta.text };
     }
   }
+  await recordCall({
+    ...meterCtx,
+    nodeId: agentId,
+    model,
+    usage: { input_tokens: inTok, output_tokens: outTok },
+    ok: true,
+  });
   yield { type: 'agent_done', agentId, artifact: full, _final: full, _in: inTok, _out: outTok };
 }
 
@@ -158,8 +152,15 @@ export async function* runDynamicTeam(
   costByClassification: Record<string, number> = {},
   resourceBundle?: ResourceBundle,
   reputationBlock = '',
-  recallBlock = ''
+  recallBlock = '',
+  runId: string | null = null,
+  userId: string | null = null
 ): AsyncGenerator<DynamicRunEvent> {
+  if (!isAIEnabled()) {
+    yield { type: 'run_error', error: new AIDisabledError().message };
+    return;
+  }
+
   CUSTOM = customAgents; // make custom agents resolvable for this run
   BUNDLE = resourceBundle; // founder-granted resources for this run
 
@@ -183,16 +184,19 @@ export async function* runDynamicTeam(
   let planRaw = '';
   try {
     const cosEffect = effectFor(BUNDLE, 'chief_of_staff');
-    const cos = await client.messages.create({
-      model: 'claude-sonnet-4-5',
-      // Headroom for larger plans: a fan-out squad adds an agent + a full
-      // taskContract per lane. Billed per token actually produced, so this costs
-      // nothing on small singleton plans; it just stops big squads truncating.
-      max_tokens: 4000,
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
-      messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
-      ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
-    });
+    const cos = await callModel(
+      { runId, userId, role: 'chief_of_staff', phase: 'compose' },
+      {
+        model: 'claude-sonnet-4-5',
+        // Headroom for larger plans: a fan-out squad adds an agent + a full
+        // taskContract per lane. Billed per token actually produced, so this costs
+        // nothing on small singleton plans; it just stops big squads truncating.
+        max_tokens: 4000,
+        system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
+        messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
+        ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
+      }
+    );
     const textBlock = cos.content.find((b) => b.type === 'text');
     planRaw = textBlock && 'text' in textBlock ? textBlock.text : '';
     tally('claude-sonnet-4-5', cos.usage?.input_tokens ?? 0, cos.usage?.output_tokens ?? 0);
@@ -256,6 +260,7 @@ export async function* runDynamicTeam(
         buildAgentContext(problem, agent, depOutputs),
         agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch,
         modelFor(agent.id),
+        { runId, userId, role: agent.role, phase: 'layer' },
         signal
       );
     });
@@ -295,12 +300,15 @@ export async function* runDynamicTeam(
       yield { type: 'cos_start' };
       let reRaw = '';
       try {
-        const re = await client.messages.create({
-          model: 'claude-sonnet-4-5',
-          max_tokens: 2000,
-          system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, reinforceRequests, budget.approved)),
-          messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
-        });
+        const re = await callModel(
+          { runId, userId, role: 'chief_of_staff', phase: 'backfire' },
+          {
+            model: 'claude-sonnet-4-5',
+            max_tokens: 2000,
+            system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, reinforceRequests, budget.approved)),
+            messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
+          }
+        );
         const tb = re.content.find((b) => b.type === 'text');
         reRaw = tb && 'text' in tb ? tb.text : '';
         tally('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0);
@@ -321,7 +329,8 @@ export async function* runDynamicTeam(
             .filter((o): o is { title: string; content: string } => Boolean(o));
           return streamAgent(
             agent.id, agentSystemPrompt(agent), buildAgentContext(problem, agent, depOutputs),
-            agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch, capabilityFloor(agent), signal
+            agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch, capabilityFloor(agent),
+            { runId, userId, role: agent.role, phase: 'backfire' }, signal
           );
         });
         const reTitleById = new Map(reAgents.map((a) => [a.id, a.title]));
@@ -354,7 +363,7 @@ export async function* runDynamicTeam(
   let critique = '';
   try {
     const criticEffect = effectFor(BUNDLE, 'critic');
-    const cstream = client.messages.stream(
+    const cstream = getAnthropic().messages.stream(
       {
         model: 'claude-sonnet-4-5',
         max_tokens: CRITIC_MAX_TOKENS,
@@ -375,6 +384,7 @@ export async function* runDynamicTeam(
       }
     }
     tally('claude-sonnet-4-5', cIn, cOut);
+    await recordCall({ runId, userId, role: 'critic', phase: 'critic', nodeId: 'critic', model: 'claude-sonnet-4-5', usage: { input_tokens: cIn, output_tokens: cOut }, ok: true });
   } catch {
     critique = '(critic unavailable)';
   }
@@ -390,7 +400,7 @@ export async function* runDynamicTeam(
   let answer = '';
   try {
     const synthEffect = effectFor(BUNDLE, 'synthesizer');
-    const stream = client.messages.stream(
+    const stream = getAnthropic().messages.stream(
       {
         model: SYNTHESIZER_MODEL,
         max_tokens: SYNTH_MAX_TOKENS,
@@ -414,6 +424,7 @@ export async function* runDynamicTeam(
       }
     }
     tally(SYNTHESIZER_MODEL, sIn, sOut);
+    await recordCall({ runId, userId, role: 'synthesizer', phase: 'synthesize', nodeId: 'synthesizer', model: SYNTHESIZER_MODEL, usage: { input_tokens: sIn, output_tokens: sOut }, ok: true });
   } catch (err) {
     yield { type: 'run_error', error: err instanceof Error ? err.message : 'Synthesizer failed' };
     return;
@@ -448,7 +459,7 @@ export async function* runDynamicTeam(
   let trainerReport = '';
   try {
     const trainerEffect = effectFor(BUNDLE, 'trainer');
-    const tstream = client.messages.stream(
+    const tstream = getAnthropic().messages.stream(
       {
         model: TRAINER_MODEL,
         max_tokens: TRAINER_MAX_TOKENS,
@@ -469,6 +480,7 @@ export async function* runDynamicTeam(
       }
     }
     tally(TRAINER_MODEL, tIn, tOut);
+    await recordCall({ runId, userId, role: 'trainer', phase: 'trainer', nodeId: 'trainer', model: TRAINER_MODEL, usage: { input_tokens: tIn, output_tokens: tOut }, ok: true });
   } catch {
     trainerReport = '(trainer unavailable)';
   }

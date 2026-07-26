@@ -1,19 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropic, isAIEnabled, AIDisabledError } from '@/lib/ai/client';
 import { AGENTS } from './agents';
 import { loadCanonFor, loadFounderManifest } from './canon-loader';
 import { RUBRICS, RUBRIC_DESCRIPTIONS } from './trainer/rubrics';
 import { AGENT_MAX_TOKENS } from './library/cfo';
 import { Artifacts, PersonaMode, RunEvent, PIPELINE_ORDER, SCORED_AGENTS } from './types';
-
-// MD-08: fail fast on missing API key rather than deep inside a streaming response.
-// Note: an empty shell-exported ANTHROPIC_API_KEY will override .env.local — Next.js
-// gives process env precedence. Pass apiKey explicitly so the value is unambiguous.
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-if (!ANTHROPIC_KEY) {
-  console.error('[SELFHIVE] ANTHROPIC_API_KEY is empty or unset. Agent calls will fail.');
-}
-
-const client = new Anthropic({ apiKey: ANTHROPIC_KEY });
 
 // HI-02 fix: wildcard no longer randomizes persona. Persona stays on its
 // deterministic rotation; the wildcard ONLY adds challenge mode. This keeps
@@ -100,6 +90,11 @@ export async function* runTeam(
   signal?: AbortSignal,
   trainerHistory: string = ''
 ): AsyncGenerator<RunEvent> {
+  if (!isAIEnabled()) {
+    yield { type: 'run_error', role: PIPELINE_ORDER[0], error: new AIDisabledError().message };
+    return;
+  }
+
   const artifacts: Artifacts = {};
 
   const isWildcardRun = runCount > 0 && runCount % 7 === 0;
@@ -139,7 +134,7 @@ export async function* runTeam(
     let sprintWarned = false;
 
     try {
-      const stream = client.messages.stream(
+      const stream = getAnthropic().messages.stream(
         {
           model: 'claude-sonnet-4-5',
           max_tokens: AGENT_MAX_TOKENS,

@@ -45,11 +45,12 @@ export async function createNode(sb: SupabaseClient, n: NewNode): Promise<void> 
 }
 
 /**
- * The atomic conservation gate (reserve_budget RPC, verified live). Returns true
- * if `costUsd` is now reserved against the node, false if its grant can't cover
- * it. Idempotent on requestId — safe to retry.
+ * Post-hoc spend settlement against a node's grant (reserve_budget RPC).
+ * Named settleSpend because it records actual spend AFTER the model call —
+ * it is not a pre-authorization. Returns true if settled, false if the grant
+ * cannot cover it. Idempotent on requestId.
  */
-export async function reserveBudget(
+export async function settleSpend(
   sb: SupabaseClient,
   runId: string,
   nodeId: string,
@@ -64,9 +65,12 @@ export async function reserveBudget(
     p_cost: costUsd,
     p_reason: reason ?? null,
   });
-  if (error) throw new Error(`reserveBudget(${nodeId}): ${error.message}`);
+  if (error) throw new Error(`settleSpend(${nodeId}): ${error.message}`);
   return data === true;
 }
+
+/** @deprecated Use settleSpend — this was never a pre-authorization. */
+export const reserveBudget = settleSpend;
 
 /**
  * Atomic parent→child budget transfer (transfer_grant RPC, verified live):

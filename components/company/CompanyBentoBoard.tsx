@@ -16,6 +16,8 @@ export interface BentoAgent {
   model: string;
   source: string; // 'library' | 'spawn'
   content: string;
+  /** Editor presentation; when set, UI shows this by default with a RAW toggle. */
+  formatted?: string;
   status: AgentRunStatus;
   dependsOn: string[];
   startedAt?: number;
@@ -57,6 +59,7 @@ interface Props {
   running: boolean;
   errorMsg: string;
   answer: string;
+  answerFormatted?: string;
   // identity + timing
   jobId: string | null;
   runStartedAt: number | null;
@@ -68,6 +71,8 @@ interface Props {
   setProblem: (s: string) => void;
   onSubmit: () => void;
   onNewRun: () => void;
+  /** When true, composer is disabled and submit shows AI PAUSED. */
+  aiPaused?: boolean;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -129,15 +134,17 @@ function modelTag(model: string): string {
 export default function CompanyBentoBoard({
   agents, order,
   phase, cfoNote, criticBody, synBody, trainerBody, trainerDone,
-  running, errorMsg, answer,
+  running, errorMsg, answer, answerFormatted,
   jobId, runStartedAt, completedAt, elapsedMs, totals,
   problem, setProblem, onSubmit, onNewRun,
+  aiPaused = false,
 }: Props) {
   const bentoRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   // Which agent's full response is open in the detail drawer (null = closed).
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showRawAnswer, setShowRawAnswer] = useState(false);
   const selected = selectedId ? agents[selectedId] : null;
 
   const isLive = running && phase !== 'IDLE' && phase !== 'COMPLETE' && phase !== 'ERRORED';
@@ -345,10 +352,11 @@ export default function CompanyBentoBoard({
             <textarea
               value={problem}
               onChange={(e) => setProblem(e.target.value)}
-              placeholder="Anything — 'what stocks should I buy this week', 'design a brand for X', 'build me a Y'."
-              disabled={running}
+              placeholder={aiPaused ? 'AI is paused — set AI_ENABLED=true to run the hive.' : "Anything — 'what stocks should I buy this week', 'design a brand for X', 'build me a Y'."}
+              disabled={running || aiPaused}
+              title={aiPaused ? 'AI PAUSED — no API calls will be made' : undefined}
               rows={2}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); onSubmit(); } }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); if (!aiPaused) onSubmit(); } }}
             />
           </div>
           {(isDone || isErr) && jobId ? (
@@ -357,9 +365,10 @@ export default function CompanyBentoBoard({
           <button
             className="submit"
             onClick={onSubmit}
-            disabled={running || !problem.trim()}
+            disabled={running || aiPaused || !problem.trim()}
+            title={aiPaused ? 'AI PAUSED — no API calls will be made' : undefined}
           >
-            {isDone ? '✓ COMPLETE' : running ? 'RUNNING…' : 'SUBMIT TO HIVE'}
+            {aiPaused ? 'AI PAUSED' : isDone ? '✓ COMPLETE' : running ? 'RUNNING…' : 'SUBMIT TO HIVE'}
           </button>
         </div>
 
@@ -401,13 +410,31 @@ export default function CompanyBentoBoard({
                     <span className="dot" style={{ background: 'var(--amber)' }} />
                     <span className="nm">SYNTHESIZED ANSWER</span>
                   </div>
-                  <span className={`st ${trainerDone ? 'done' : 'work'}`}>
-                    {trainerDone ? '★ TRAINER COMPLETE' : 'TRAINER SCORING…'}
-                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    {answerFormatted ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowRawAnswer((v) => !v)}
+                        style={{
+                          fontSize: '0.45rem', fontWeight: 700, letterSpacing: '0.12em',
+                          background: 'transparent', border: '1px solid var(--border-bright)',
+                          color: 'var(--text-muted)', borderRadius: 3, padding: '2px 8px',
+                          cursor: 'pointer', fontFamily: 'inherit',
+                        }}
+                      >
+                        {showRawAnswer ? 'FORMATTED' : 'RAW'}
+                      </button>
+                    ) : null}
+                    <span className={`st ${trainerDone ? 'done' : 'work'}`}>
+                      {trainerDone ? '★ TRAINER COMPLETE' : 'TRAINER SCORING…'}
+                    </span>
+                  </div>
                 </div>
                 <div className="ansbody">
                   <div className="agent-prose">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {!showRawAnswer && answerFormatted ? answerFormatted : answer}
+                    </ReactMarkdown>
                   </div>
 
                   {/* TRAINER REPORT — streams live while scoring, stays readable
@@ -461,7 +488,11 @@ export default function CompanyBentoBoard({
                 <div className="ansfoot">
                   {totals?.agents ? <span>{totals.agents} agents</span> : null}
                   {totals?.usd != null ? (
-                    <span>SPEND <span className="v">${totals.usd.toFixed(2)}</span> / ${totals.ceilingUsd.toFixed(2)}</span>
+                    <span>
+                      SPEND <span className="v">${totals.usd.toFixed(2)}</span> / ${totals.ceilingUsd.toFixed(2)}
+                      {' · '}
+                      <a href="/ledger" style={{ color: '#f59e0b', textDecoration: 'none', letterSpacing: '0.08em' }}>→ LEDGER</a>
+                    </span>
                   ) : null}
                   {completedAt && runStartedAt ? (
                     <span>RUN <span className="v">{fmtElapsed(completedAt - runStartedAt)}</span></span>
@@ -587,9 +618,9 @@ export default function CompanyBentoBoard({
 
                   {/* body — hidden by CSS for mini (done) tiles */}
                   <div className="bd">
-                    {isHero && a.content ? (
+                    {isHero && (a.formatted || a.content) ? (
                       <div className="agent-prose" style={{ fontSize: '0.66rem' }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.formatted || a.content}</ReactMarkdown>
                       </div>
                     ) : a.status === 'working' ? (
                       <span className="sh-working-hint">
@@ -643,10 +674,12 @@ export default function CompanyBentoBoard({
 // ──────────────────────────────────────────────────────────────────
 function AgentDetailDrawer({ agent, onClose }: { agent: BentoAgent; onClose: () => void }) {
   const stop = useCallback((e: React.MouseEvent) => e.stopPropagation(), []);
+  const [showRaw, setShowRaw] = useState(false);
   const statusLabel =
     agent.status === 'working' ? 'WORKING'
     : agent.status === 'done' ? 'DONE'
     : agent.status === 'errored' ? 'ERROR' : 'QUEUED';
+  const body = !showRaw && agent.formatted ? agent.formatted : agent.content;
 
   return (
     <>
@@ -698,26 +731,42 @@ function AgentDetailDrawer({ agent, onClose }: { agent: BentoAgent; onClose: () 
               {agent.model && <span>{modelTag(agent.model)}</span>}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: 'transparent', border: '1px solid var(--border-bright)',
-              color: 'var(--text-muted)', borderRadius: 4,
-              width: 28, height: 28, fontSize: '0.7rem', cursor: 'pointer',
-              fontFamily: 'inherit', flexShrink: 0,
-            }}
-            aria-label="Close response"
-            title="esc"
-          >
-            ×
-          </button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+            {agent.formatted ? (
+              <button
+                type="button"
+                onClick={() => setShowRaw((v) => !v)}
+                style={{
+                  background: 'transparent', border: '1px solid var(--border-bright)',
+                  color: 'var(--text-muted)', borderRadius: 4,
+                  fontSize: '0.45rem', fontWeight: 700, letterSpacing: '0.1em',
+                  padding: '4px 8px', cursor: 'pointer', fontFamily: 'inherit',
+                }}
+              >
+                {showRaw ? 'FORMATTED' : 'RAW'}
+              </button>
+            ) : null}
+            <button
+              onClick={onClose}
+              style={{
+                background: 'transparent', border: '1px solid var(--border-bright)',
+                color: 'var(--text-muted)', borderRadius: 4,
+                width: 28, height: 28, fontSize: '0.7rem', cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+              aria-label="Close response"
+              title="esc"
+            >
+              ×
+            </button>
+          </div>
         </div>
 
         {/* body — full response */}
         <div style={{ flex: 1, overflow: 'auto', padding: '18px 22px' }}>
-          {agent.content ? (
+          {body ? (
             <div className="agent-prose" style={{ fontSize: '0.68rem', lineHeight: 1.75 }}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{agent.content}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
               {agent.status === 'working' && (
                 <span style={{ color: 'var(--text-dim)', letterSpacing: '0.1em' }}>▌ streaming…</span>
               )}
@@ -737,7 +786,7 @@ function AgentDetailDrawer({ agent, onClose }: { agent: BentoAgent; onClose: () 
           display: 'flex', justifyContent: 'space-between',
         }}>
           <span>esc · click outside to close</span>
-          <span>{agent.content ? `${agent.content.length.toLocaleString()} chars` : ''}</span>
+          <span>{body ? `${body.length.toLocaleString()} chars` : ''}</span>
         </div>
       </aside>
 

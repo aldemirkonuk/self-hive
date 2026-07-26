@@ -7,11 +7,9 @@
 // Self-sufficient: uses the existing Anthropic key (no embeddings provider). If
 // the LLM is unavailable, it degrades to deterministic title matching.
 
-import Anthropic from '@anthropic-ai/sdk';
+import { callModel, isAIEnabled } from '@/lib/ai/client';
 import { WORKFORCE_MODEL } from './constants';
 import type { SpawnCluster } from './store';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3, timeout: 60_000 });
 
 export interface SpawnIdentityInput {
   spawnedId: string;
@@ -43,6 +41,8 @@ export async function resolveIdentities(
 }
 
 async function llmResolve(spawns: SpawnIdentityInput[], clusters: SpawnCluster[]): Promise<ResolvedIdentity[]> {
+  if (!isAIEnabled()) return spawns.map((s) => deterministic(s, clusters));
+
   const registry = clusters.length
     ? clusters
         .map((c, i) => `  ${i}. id=${c.id} · "${c.canonical_title}" (${c.canonical_domain}) — ${c.role_summary}`)
@@ -74,12 +74,16 @@ For EACH newly spawned agent (by its [index]), output one object:
 
 Respond with ONLY a JSON array, no prose, no markdown fences.`;
 
-  const resp = await client.messages.create({
-    model: WORKFORCE_MODEL,
-    max_tokens: 1200,
-    system,
-    messages: [{ role: 'user', content: 'Resolve identities now.' }],
-  });
+  const resp = await callModel(
+    { role: 'registrar', phase: 'compose' },
+    {
+      model: WORKFORCE_MODEL,
+      max_tokens: 1200,
+      system,
+      messages: [{ role: 'user', content: 'Resolve identities now.' }],
+    },
+    { maxRetries: 3, timeout: 60_000 },
+  );
   const block = resp.content.find((b) => b.type === 'text');
   const raw = block && 'text' in block ? block.text : '';
   const parsed = parseJsonArray(raw);

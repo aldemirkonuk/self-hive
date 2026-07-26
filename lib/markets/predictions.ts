@@ -1,6 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { callModel, AIDisabledError, isAIEnabled } from '@/lib/ai/client';
 
 export interface RawPick {
   ticker: string;
@@ -15,8 +13,12 @@ export interface RawPick {
  * to turn prose into records the Outcome Loop can verify against real prices.
  * Returns [] if the answer contains no concrete, tickered positions.
  */
-export async function extractPredictions(answer: string): Promise<RawPick[]> {
+export async function extractPredictions(
+  answer: string,
+  meter?: { userId?: string | null; runId?: string | null },
+): Promise<RawPick[]> {
   if (!answer || answer.length < 40) return [];
+  if (!isAIEnabled()) return [];
 
   const system = `You extract concrete, checkable stock positions from an investment answer.
 Return ONLY a JSON array (no prose, no fences). Each item:
@@ -30,12 +32,21 @@ Rules:
 - If there are no concrete tickered positions, return [].`;
 
   try {
-    const res = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 800,
-      system,
-      messages: [{ role: 'user', content: `Extract positions from this answer:\n\n${answer.slice(0, 6000)}` }],
-    });
+    const res = await callModel(
+      {
+        userId: meter?.userId,
+        runId: meter?.runId,
+        role: 'extract_predictions',
+        phase: 'extract',
+      },
+      {
+        model: 'claude-haiku-4-5',
+        max_tokens: 800,
+        system,
+        messages: [{ role: 'user', content: `Extract positions from this answer:\n\n${answer.slice(0, 6000)}` }],
+      },
+      { maxRetries: 3, timeout: 60_000 },
+    );
     const block = res.content.find((b) => b.type === 'text');
     const text = block && 'text' in block ? block.text : '[]';
     const cleaned = text.replace(/```json\s*|\s*```/g, '').trim();
@@ -57,7 +68,8 @@ Rules:
         thesis: typeof p.thesis === 'string' ? p.thesis.slice(0, 300) : '',
       }))
       .slice(0, 10); // cap positions per run
-  } catch {
+  } catch (e) {
+    if (e instanceof AIDisabledError) return [];
     return [];
   }
 }

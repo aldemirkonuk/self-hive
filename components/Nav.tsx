@@ -15,6 +15,8 @@ const TABS = [
   { href: '/hive', label: 'HIVE' },
   { href: '/resources', label: 'RESOURCES' },
   { href: '/history', label: 'HISTORY' },
+  { href: '/ledger', label: 'LEDGER' },
+  { href: '/approvals', label: 'APPROVALS' },
   { href: '/dashboard', label: 'DASHBOARD' },
   { href: '/founder', label: 'FOUNDER' },
   { href: '/training', label: 'TRAINING' },
@@ -34,6 +36,7 @@ export default function Nav({ isRunning, runCount = 0, isWildcardRun, onStop, us
   const router = useRouter();
   const [showFounderDropdown, setShowFounderDropdown] = useState(false);
   const [authedEmail, setAuthedEmail] = useState<string | null>(userEmail ?? null);
+  const [pendingCount, setPendingCount] = useState(0);
 
   // Resolve the signed-in user from the browser session.
   useEffect(() => {
@@ -45,6 +48,28 @@ export default function Nav({ isRunning, runCount = 0, isWildcardRun, onStop, us
     });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // Pending change_requests badge on the APPROVALS tab — RLS-scoped, so a
+  // plain head-count query is safe to run straight from the browser client.
+  useEffect(() => {
+    if (!isSupabaseConfiguredClient() || !authedEmail) {
+      setPendingCount(0);
+      return;
+    }
+    let cancelled = false;
+    const sb = getBrowserSupabase();
+    (async () => {
+      try {
+        const { count } = await sb.from('change_requests')
+          .select('id', { count: 'exact', head: true })
+          .eq('status', 'pending');
+        if (!cancelled) setPendingCount(count ?? 0);
+      } catch {
+        /* table may not exist until migration 0011 is applied */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authedEmail, pathname]);
 
   const signOut = async () => {
     if (!isSupabaseConfiguredClient()) return;
@@ -100,6 +125,22 @@ export default function Nav({ isRunning, runCount = 0, isWildcardRun, onStop, us
               className={`nav-tab ${pathname === tab.href ? 'active' : ''}`}
             >
               {tab.label}
+              {tab.href === '/approvals' && pendingCount > 0 && (
+                <span
+                  style={{
+                    marginLeft: 5,
+                    fontSize: '0.5rem',
+                    fontWeight: 700,
+                    color: '#0a0a0a',
+                    background: '#f59e0b',
+                    borderRadius: 999,
+                    padding: '1px 5px',
+                    letterSpacing: 0,
+                  }}
+                >
+                  {pendingCount}
+                </span>
+              )}
             </Link>
           ))}
         </nav>

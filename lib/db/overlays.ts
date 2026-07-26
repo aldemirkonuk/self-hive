@@ -49,6 +49,11 @@ export interface OverlayRow {
   // an un-migrated database (select('*') simply won't return them).
   reinforcement_count?: number;
   last_reinforced_at?: string | null;
+  // Present once migration 0010 is applied. 'distiller' (default) = the hive
+  // derived this from its own run history; 'professor' = TAUGHT — a founder-
+  // approved curriculum lesson grounded in an outside source.
+  source?: 'distiller' | 'professor';
+  lesson_id?: number | null;
 }
 
 // Shape returned by the match_agent_overlays RPC (migration 0008).
@@ -207,16 +212,31 @@ function fallbackEpisodic(
 
 /**
  * Format a single agent's overlays for injection into its system prompt.
- * Empty string when there are no overlays.
+ * Empty string when there are no overlays. Splits into two headings:
+ *   ## LEARNED — the distiller/immunizer's self-derived improvements (unchanged).
+ *   ## TAUGHT  — PROFESSOR curriculum lessons, founder-approved knowledge pulled
+ *                from an outside source (papers/books/docs), kept visually
+ *                distinct since its provenance and trust model differ.
  */
 export function formatOverlaysForPrompt(overlays: OverlayRow[]): string {
   if (!overlays.length) return '';
-  const lines = overlays.map((o) => {
+  const learned = overlays.filter((o) => o.source !== 'professor');
+  const taught = overlays.filter((o) => o.source === 'professor');
+
+  const line = (o: OverlayRow) => {
     const rc = o.reinforcement_count ?? 1;
     const marks = [o.pinned ? 'pinned' : '', rc > 1 ? `reinforced ×${rc}` : ''].filter(Boolean);
     return `• ${o.advice_text}${marks.length ? ` [${marks.join(', ')}]` : ''}`;
-  });
-  return `\n\n--- COMPANY LEARNINGS (improvements the TRAINER derived for you from prior runs like this one — apply them in addition to your task contract) ---\n${lines.join('\n')}\n--- END COMPANY LEARNINGS ---`;
+  };
+
+  let out = '';
+  if (learned.length) {
+    out += `\n\n--- COMPANY LEARNINGS (## LEARNED — improvements the TRAINER derived for you from prior runs like this one — apply them in addition to your task contract) ---\n${learned.map(line).join('\n')}\n--- END COMPANY LEARNINGS ---`;
+  }
+  if (taught.length) {
+    out += `\n\n--- COMPANY CURRICULUM (## TAUGHT — founder-approved lessons the PROFESSOR sourced from outside SELFHIVE; treat as durable, vetted knowledge) ---\n${taught.map(line).join('\n')}\n--- END COMPANY CURRICULUM ---`;
+  }
+  return out;
 }
 
 export interface InsertOverlaysResult {
@@ -337,6 +357,43 @@ export async function insertOverlays(
     }
   }
   return result;
+}
+
+export interface InsertProfessorOverlayArgs {
+  userId: string;
+  agentId: string; // role
+  category: string; // one of the 5 rubric categories (see agent_prompt_overlays check)
+  adviceText: string;
+  lessonId: number;
+  sourceRunId?: string | null;
+}
+
+/**
+ * Write a TAUGHT overlay — a founder-APPROVED PROFESSOR curriculum lesson
+ * (migration 0010/0011: lib/approvals/store.ts calls this from the
+ * `curriculum_lesson` approval branch, never before approval). Unlike
+ * distiller/immunizer overlays (episodic, earn pin status by recurring),
+ * a taught lesson is pinned immediately — it's durable, already-vetted
+ * knowledge from an outside source, not something that needs to re-derive
+ * itself across runs to earn core-memory status.
+ */
+export async function insertProfessorOverlay(args: InsertProfessorOverlayArgs): Promise<boolean> {
+  const sb = getAdminSupabase();
+  const { error } = await sb.from('agent_prompt_overlays').insert({
+    user_id: args.userId,
+    agent_id: args.agentId,
+    classification: null,
+    category: args.category,
+    advice_text: args.adviceText.slice(0, 400),
+    source_run_id: args.sourceRunId ?? null,
+    source_score: null,
+    pinned: true,
+    pinned_at: new Date().toISOString(),
+    disabled: false,
+    source: 'professor',
+    lesson_id: args.lessonId,
+  });
+  return !error;
 }
 
 /**

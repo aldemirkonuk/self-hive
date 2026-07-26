@@ -37,7 +37,7 @@ export interface BudgetEntry {
   reason?: string;
 }
 
-export type ArtifactKind = 'leaf' | 'reduce' | 'synth';
+export type ArtifactKind = 'leaf' | 'reduce' | 'synth' | 'formatted';
 
 // A produced deliverable, stored by reference (row of `node_artifacts`).
 export interface NodeArtifact {

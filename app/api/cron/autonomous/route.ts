@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { isAIEnabled } from '@/lib/ai/client';
 import { runAutonomousCycle } from '@/lib/jobs/autonomous';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 
@@ -29,6 +30,9 @@ async function authorized(req: NextRequest): Promise<boolean> {
 export async function GET(req: NextRequest) {
   if (!(await authorized(req))) {
     return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
+  if (!isAIEnabled()) {
+    return new Response(JSON.stringify({ error: 'AI_DISABLED' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
   }
   const result = await runAutonomousCycle();
   return new Response(JSON.stringify(result), { status: result.ok ? 200 : 500, headers: { 'Content-Type': 'application/json' } });

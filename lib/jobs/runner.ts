@@ -127,7 +127,7 @@ async function executeDynamicJobInner(
   let runCostRow: { classification: string; inputTokens: number; outputTokens: number; costUsd: number } | null = null;
 
   try {
-    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle, reputationBlock, recallBlock)) {
+    for await (const ev of runDynamicTeam(problem, undefined, trainerHistory, customAgents, costByClassification, resourceBundle, reputationBlock, recallBlock, runId, userId)) {
       switch (ev.type) {
         case 'agent_delta': {
           if (!ev.agentId) break;
@@ -227,8 +227,9 @@ async function executeDynamicJobInner(
   }
 
   // SELF-STAFFING LOOP (parity with the workflow path's finalizeImpl): persist
-  // spawned agents, cluster them via the Registrar, auto-promote proven geniuses
-  // into custom_agents and retire drifters. Best-effort — never breaks a run.
+  // spawned agents, cluster them via the Registrar, file a pending promotion
+  // request for proven geniuses (approved in /approvals — Phase 0.9) and retire
+  // drifters. Best-effort — never breaks a run.
   if (userId && status === 'completed') {
     try {
       const outcome = await recordSpawnedWorkforce({
@@ -238,8 +239,12 @@ async function executeDynamicJobInner(
         spawnedAgents: spawnedThisRun,
         scores: trainerScores,
       });
-      if (outcome.promoted.length || outcome.retired.length) {
-        await writeEvent('workforce_update', { promoted: outcome.promoted, retired: outcome.retired });
+      if (outcome.promoted.length || outcome.promotionsRequested.length || outcome.retired.length) {
+        await writeEvent('workforce_update', {
+          promoted: outcome.promoted,
+          promotionsRequested: outcome.promotionsRequested,
+          retired: outcome.retired,
+        });
       }
     } catch {
       /* non-fatal */

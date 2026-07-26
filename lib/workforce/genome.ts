@@ -12,15 +12,8 @@
 // This file is pure + self-contained (one bounded Haiku call for the actual mutation)
 // so the mutation/selection logic is unit-testable without a database.
 
-import Anthropic from '@anthropic-ai/sdk';
+import { callModel, isAIEnabled } from '@/lib/ai/client';
 import { WORKFORCE_MODEL } from './constants';
-
-// Lazy so importing this module (for the pure mutation/selection logic, e.g. in
-// tests) never constructs a client or needs an API key — only breedChallenger does.
-let _client: Anthropic | null = null;
-function client(): Anthropic {
-  return (_client ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 3, timeout: 60_000 }));
-}
 
 export const GENOME = {
   // A challenger must prove itself across this many scored appearances before the
@@ -122,13 +115,18 @@ export async function breedChallenger(parent: {
     systemPrompt: parent.systemPrompt,
     mandate: parent.mandate,
   };
+  if (!isAIEnabled()) return fallback;
   try {
-    const resp = await client().messages.create({
-      model: WORKFORCE_MODEL,
-      max_tokens: 1600,
-      system: mutateGenomePrompt(parent.title, parent.systemPrompt, plan.gene),
-      messages: [{ role: 'user', content: 'Breed the challenger now.' }],
-    });
+    const resp = await callModel(
+      { role: 'genome', phase: 'promote' },
+      {
+        model: WORKFORCE_MODEL,
+        max_tokens: 1600,
+        system: mutateGenomePrompt(parent.title, parent.systemPrompt, plan.gene),
+        messages: [{ role: 'user', content: 'Breed the challenger now.' }],
+      },
+      { maxRetries: 3, timeout: 60_000 },
+    );
     const block = resp.content.find((b) => b.type === 'text');
     const raw = block && 'text' in block ? block.text : '';
     const cleaned = raw.replace(/```json\s*|\s*```/g, '').trim();

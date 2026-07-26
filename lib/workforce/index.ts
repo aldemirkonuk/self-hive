@@ -20,7 +20,7 @@ import {
   type SpawnInstance,
 } from './store';
 import { resolveIdentities, type SpawnIdentityInput } from './registrar';
-import { evaluatePromotion, evaluateRetirement } from './promotion';
+import { requestPromotion, evaluateRetirement } from './promotion';
 import { resolveDuels } from './duel';
 
 export interface SpawnedAgentInput {
@@ -35,12 +35,13 @@ export interface SpawnedAgentInput {
 }
 
 export interface WorkforceOutcome {
-  promoted: string[]; // titles graduated to permanent staff this run
+  promoted: string[]; // titles graduated to permanent staff this run (GENOME duel wins only — see below)
+  promotionsRequested: string[]; // titles that cleared the bar and now await founder approval in /approvals
   retired: string[]; // titles retired this run
   spawnsTracked: number;
 }
 
-const EMPTY: WorkforceOutcome = { promoted: [], retired: [], spawnsTracked: 0 };
+const EMPTY: WorkforceOutcome = { promoted: [], promotionsRequested: [], retired: [], spawnsTracked: 0 };
 
 export async function recordSpawnedWorkforce(args: {
   userId: string | null;
@@ -54,6 +55,7 @@ export async function recordSpawnedWorkforce(args: {
 
   try {
     const promoted: string[] = [];
+    const promotionsRequested: string[] = [];
     const retired: string[] = [];
 
     // Case-insensitive trainer-score lookup by title.
@@ -75,11 +77,11 @@ export async function recordSpawnedWorkforce(args: {
       if (i >= 0) working[i] = updated;
 
       if (updated.status === 'candidate' && exemplar) {
-        const p = await evaluatePromotion(updated, exemplar);
-        if (p) {
-          promoted.push(p.title);
-          if (i >= 0) working[i] = { ...updated, status: 'promoted', promoted_agent_key: p.agentKey };
-        }
+        // Phase 0.9: clearing the bar no longer promotes inline — it files a
+        // pending agent_promotion change_request. The cluster STAYS 'candidate'
+        // (working[i] unchanged) until the founder approves it in /approvals.
+        const p = await requestPromotion(updated, exemplar, { runId });
+        if (p) promotionsRequested.push(p.title);
       } else if (updated.status === 'promoted') {
         const r = await evaluateRetirement(updated);
         if (r) {
@@ -172,7 +174,7 @@ export async function recordSpawnedWorkforce(args: {
       /* non-fatal — duels never break a run */
     }
 
-    return { promoted, retired, spawnsTracked: instances.length };
+    return { promoted, promotionsRequested, retired, spawnsTracked: instances.length };
   } catch (err) {
     console.error('[selfhive] recordSpawnedWorkforce failed:', err instanceof Error ? err.message : err);
     return EMPTY;

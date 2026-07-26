@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { callModel, isAIEnabled } from '@/lib/ai/client';
 import { getAdminSupabase, isAdminConfigured } from '../db/supabase-admin';
 import { getFounderUserId } from '../db/founder';
 import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../markets/portfolio';
@@ -10,8 +10,6 @@ import { runDream } from './dream';
 import { getUserSettingsAdmin } from '../db/settings';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 4 });
 
 /**
  * The autonomous CEO. Surveys the company's state (portfolio, learned edges,
@@ -62,12 +60,15 @@ ${edges}
 What is the single best markets problem to work on today? One sentence.`;
 
   try {
-    const res = await client.messages.create({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 300,
-      system,
-      messages: [{ role: 'user', content: user }],
-    });
+    const res = await callModel(
+      { userId, role: 'ceo', phase: 'compose' },
+      {
+        model: 'claude-sonnet-4-5',
+        max_tokens: 300,
+        system,
+        messages: [{ role: 'user', content: user }],
+      },
+    );
     const tb = res.content.find((b) => b.type === 'text');
     const text = tb && 'text' in tb ? tb.text.trim() : '';
     return text || 'Identify the 2 highest-conviction equity opportunities based on this week’s market trends, with full risk analysis.';
@@ -96,6 +97,7 @@ export interface AutonomousResult {
  * Called by the daily cron. Runs entirely under the service role (no user session).
  */
 export async function runAutonomousCycle(): Promise<AutonomousResult> {
+  if (!isAIEnabled()) return { ok: false, error: 'AI_DISABLED' };
   if (!isAdminConfigured()) return { ok: false, error: 'service role not configured' };
   const userId = await getFounderUserId();
   if (!userId) return { ok: false, error: 'no founder user found' };

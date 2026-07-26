@@ -1,4 +1,5 @@
 import { NextRequest, after } from 'next/server';
+import { isAIEnabled } from '@/lib/ai/client';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { createDynamicRun, executeDynamicJob } from '@/lib/jobs/runner';
 import { getTrainerHistory, formatHistoryForTrainer } from '@/lib/db/history';
@@ -58,6 +59,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return json(400, { error: 'Invalid JSON' });
   }
+
+  if (!isAIEnabled()) return json(503, { error: 'AI_DISABLED' });
 
   const { problem } = body;
   if (!problem || typeof problem !== 'string') return json(400, { error: 'Problem required' });

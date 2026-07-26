@@ -4,7 +4,11 @@
 // client (a workflow has no user session). Mirrors orchestrator-dynamic.ts but
 // returns serializable results instead of streaming through a generator.
 
-import Anthropic from '@anthropic-ai/sdk';
+import { getAnthropic, callModel, isAIEnabled } from '../ai/client';
+import { costUsd } from '../cost/pricing';
+import { recordCall } from '../cost/meter';
+import type { StepCost } from '../cost/types';
+import { ZERO_COST, addCost } from '../cost/types';
 import { getAdminSupabase } from '../db/supabase-admin';
 import { LIBRARY, Specialist } from '../library/specialists';
 import {
@@ -23,11 +27,16 @@ import {
 } from '../library/reinforcement';
 import { criticSystemPrompt, buildCriticContext } from '../library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from '../library/synthesizer';
+import { editorSystemPrompt, buildEditorUserMessage, familyFor, EDITOR_ID } from '../library/editor';
+import { extractFiguresTail, FIGURES_PROMPT_SUFFIX } from '../library/editor/source-suffix';
+import { verifyNoNewFacts } from '../library/editor/verify';
+import { EDITOR_MODEL, EDITOR_MAX_TOKENS, EDITOR_MIN_SOURCE_CHARS } from '../cost/limits';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from '../trainer/dynamic-trainer';
-import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable } from '../library/distiller';
+import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable, type DistilledOverlay } from '../library/distiller';
 import { immunizerSystemPrompt, formatAntibodiesForPrompt, ANTIBODY_AGENT_ID } from '../library/immunizer';
 import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, listActiveAdviceForRoles, type OverlayRow } from '../db/overlays';
 import { getUserSettingsAdmin } from '../db/settings';
+import { auditAutoApproved } from '../approvals/policy';
 import { loadFounderManifest, loadCanonFor } from '../canon-loader';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { AgentRole } from '../types';
@@ -41,15 +50,14 @@ import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
 // ── Elastic Workforce (P1) — all gated by isElastic(); off-path is untouched ──
 import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext, loadRoiByTitle, roiByRoleFromTitles } from '../elastic/p1';
+import { recordArtifact, settleSpend, setNodeStatus, readDailySpent, bumpDailySpent } from '../elastic/ledger';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
-import { reserveBudget, recordArtifact, setNodeStatus, readDailySpent, bumpDailySpent } from '../elastic/ledger';
 import { backpressureFactor } from '../elastic/cfo';
 import { TIERS, MODEL_LEAD, MODEL_LEAF, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS, SUBTEAM_MAX } from '../elastic/config';
 import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
 import { buildSubteamHeader, buildSubteamContext, buildSubAgentPrompt, type SubResult } from '../elastic/subteam';
 import type { LeafOutput } from '../elastic/types';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 6, timeout: 120_000 });
 const DISCLAIMER = 'SELFHIVE does not provide investment advice or stock recommendations.';
 const WEB_SEARCH_TOOL = { type: 'web_search_20250305', name: 'web_search', max_uses: 2 } as const;
 
@@ -58,20 +66,10 @@ function cachedSystem(prompt: string) {
 }
 
 // ── CFO cost accounting (ME-07): every step reports tokens + $ so the workflow
-// can record run_costs and the CFO learns the per-task cost. ──
-export interface StepCost { usd: number; in: number; out: number }
-export const ZERO_COST: StepCost = { usd: 0, in: 0, out: 0 };
-const PRICING: Record<string, { in: number; out: number }> = {
-  'claude-sonnet-4-5': { in: 3, out: 15 },
-  'claude-haiku-4-5': { in: 1, out: 5 },
-};
-function costUsd(model: string, inTok: number, outTok: number): number {
-  const p = PRICING[model] ?? PRICING['claude-sonnet-4-5'];
-  return (inTok * p.in + outTok * p.out) / 1_000_000;
-}
-export function addCost(a: StepCost, b: StepCost): StepCost {
-  return { usd: a.usd + b.usd, in: a.in + b.in, out: a.out + b.out };
-}
+// can record run_costs and the CFO learns the per-task cost. Re-exported from
+// the shared cost spine so this file and the callers share one definition. ──
+export type { StepCost };
+export { ZERO_COST, addCost };
 
 // Monotonic event emitter across steps — each step continues from the current max seq.
 async function makeEmitter(runId: string) {
@@ -99,7 +97,8 @@ function agentSystemPrompt(
   // Auto-mutated overlays from prior trainer runs — silently applied unless the
   // founder has flipped the global kill switch (loaded as [] in that case).
   const learnings = formatOverlaysForPrompt(overlays);
-  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}${REINFORCE_PROTOCOL}`;
+  const figures = familyFor(agent.role) === 'financial' ? FIGURES_PROMPT_SUFFIX : '';
+  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}${REINFORCE_PROTOCOL}${figures}`;
 }
 
 function buildAgentContext(problem: string, depOutputs: { title: string; content: string }[]): string {
@@ -124,19 +123,34 @@ export async function composeImpl(
   userId: string | null = null,
 ) {
   const emit = await makeEmitter(runId);
+
+  if (!isAIEnabled()) {
+    await emit('run_error', { error: 'AI_DISABLED' });
+    return {
+      plan: { classification: 'ai_disabled', rationale: 'AI_DISABLED', agents: [], isRegulatedFinance: false } as TeamPlan,
+      models: {} as Record<string, string>,
+      cost: ZERO_COST,
+      costMode: false,
+      elastic: false,
+    };
+  }
+
   await emit('cos_start');
 
   const customDescs = Object.values(customAgents).map((c) => ({ id: c.id, title: c.title, domain: c.domain, mandate: c.successCriteria }));
   const cosEffect = effectFor(bundle, 'chief_of_staff');
-  const cos = await client.messages.create({
-    // Headroom (4000) for larger fan-out plans — a squad adds an agent + a full
-    // taskContract per lane; billed per token produced, so free on small plans.
-    model: 'claude-sonnet-4-5', max_tokens: 4000,
-    // CoS now sees prior-run trainer scores — closes the improvement loop.
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
-    messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
-    ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
-  });
+  const cos = await callModel(
+    { userId, runId, role: 'chief_of_staff', phase: 'compose' },
+    {
+      // Headroom (4000) for larger fan-out plans — a squad adds an agent + a full
+      // taskContract per lane; billed per token produced, so free on small plans.
+      model: 'claude-sonnet-4-5', max_tokens: 4000,
+      // CoS now sees prior-run trainer scores — closes the improvement loop.
+      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
+      messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
+      ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
+    },
+  );
   const tb = cos.content.find((b) => b.type === 'text');
   const planRaw = tb && 'text' in tb ? tb.text : '';
 
@@ -210,6 +224,8 @@ async function executeAgents(
   // Way 1 fold: a lead's sub-team results — `header` shown atop its tile, `context`
   // injected into its prompt to synthesize from. Only ever set for a single lead.
   leadPreface?: { header: string; context: string },
+  // Metering context threaded into every agent_calls row this batch records.
+  meterCtx: { userId: string | null; runId: string; phase: string } = { userId: null, runId: '', phase: 'layer' },
 ): Promise<AgentResult[]> {
   const COLORS = ['#22c55e', '#06b6d4', '#8b5cf6', '#ef4444', '#3b82f6', '#f59e0b'];
   return Promise.all(agents.map(async (agent, idx) => {
@@ -222,9 +238,9 @@ async function executeAgents(
 
     if (!elastic) {
       // ── Original single-pass path (UNCHANGED — the off-path) ──
-      let content = ''; let lastFlush = 0;
+      let content = ''; let lastFlush = 0; let ok = true;
       try {
-        const stream = client.messages.stream({
+        const stream = getAnthropic().messages.stream({
           model, max_tokens: AGENT_MAX_TOKENS,
           system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
           messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
@@ -241,8 +257,13 @@ async function executeAgents(
           }
         }
       } catch (e) {
+        ok = false;
         content = content || `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
       }
+      await recordCall({
+        userId: meterCtx.userId, runId: meterCtx.runId, nodeId: agent.id, role: agent.role, phase: meterCtx.phase,
+        model, usage: { input_tokens: inTok, output_tokens: outTok }, ok,
+      });
       await emit('agent_content', { agentId: agent.id, content });
       await emit('agent_done', { agentId: agent.id, artifact: content });
       return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
@@ -267,6 +288,7 @@ async function executeAgents(
     let stopReason: string | null = null;
     let hadBlock = false;
     let leafOut: LeafOutput = { summary: '', confidence: 0, findings: [], citations: [] };
+    let ok = true;
     if (content) await emit('agent_content', { agentId: agent.id, content });
 
     while (true) {
@@ -278,7 +300,7 @@ async function executeAgents(
       const timer = setTimeout(() => ac.abort(), remaining);
       let roundText = ''; let roundIn = 0; let roundOut = 0;
       try {
-        const stream = client.messages.stream({
+        const stream = getAnthropic().messages.stream({
           model, max_tokens: AGENT_MAX_TOKENS, system,
           messages: [{ role: 'user', content: userContent }],
           ...(hasTools ? { tools: [WEB_SEARCH_TOOL] } : {}),
@@ -297,6 +319,7 @@ async function executeAgents(
           }
         }
       } catch (e) {
+        ok = false;
         if (!content && !roundText) roundText = `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
       } finally {
         clearTimeout(timer);
@@ -313,6 +336,10 @@ async function executeAgents(
       round++;
     }
 
+    await recordCall({
+      userId: meterCtx.userId, runId: meterCtx.runId, nodeId: agent.id, role: agent.role, phase: meterCtx.phase,
+      model, usage: { input_tokens: inTok, output_tokens: outTok }, ok,
+    });
     await emit('agent_content', { agentId: agent.id, content: stripLeafTail(content) });
     await emit('agent_done', { agentId: agent.id, artifact: stripLeafTail(content) });
     return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
@@ -327,6 +354,8 @@ export async function runLayerImpl(
   userId: string | null = null,
   classification: string | null = null,
 ) {
+  if (!isAIEnabled()) return { outputs: {} as Record<string, { title: string; content: string }>, cost: ZERO_COST };
+
   const emit = await makeEmitter(runId);
   // Load active overlays once per layer. Overlays are ROLE-scoped learnings, so we
   // query by the layer's DISTINCT roles — every lane of a squad inherits the same
@@ -334,7 +363,10 @@ export async function runLayerImpl(
   // kill switch.
   const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification, problem);
   const elastic = isElastic();
-  const results = await executeAgents(emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent, elastic);
+  const results = await executeAgents(
+    emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent, elastic,
+    undefined, { userId, runId, phase: 'layer' },
+  );
 
   const out: Record<string, { title: string; content: string }> = {};
   let cost: StepCost = { ...ZERO_COST };
@@ -349,7 +381,7 @@ export async function runLayerImpl(
       try {
         await recordArtifact(sb, { runId, nodeId: r.id, kind: 'leaf', content: prose, summary: output.summary, structured: output, tokens: r.out });
         // Record actual spend against the node's grant (idempotent on the key).
-        await reserveBudget(sb, runId, r.id, `spend:${r.id}:${r.in}:${r.out}`, r.usd, 'leaf');
+        await settleSpend(sb, runId, r.id, `spend:${r.id}:${r.in}:${r.out}`, r.usd, 'leaf');
         await setNodeStatus(sb, runId, r.id, 'done'); // planned → done (for the tree viewer)
       } catch { /* node bookkeeping never breaks a run */ }
     }
@@ -370,6 +402,13 @@ export async function runLeadImpl(
   models: Record<string, string>, customAgents: Record<string, Specialist>, bundle?: ResourceBundle,
   userId: string | null = null, classification: string | null = null,
 ) {
+  if (!isAIEnabled()) {
+    return {
+      outputs: {} as Record<string, { title: string; content: string }>,
+      cost: ZERO_COST,
+    };
+  }
+
   const emit = await makeEmitter(runId);
 
   // 1. Sub-lanes run suppressed (no UI events), in parallel, structured.
@@ -377,11 +416,14 @@ export async function runLeadImpl(
   const subResults = await Promise.all(lanes.map(async (s): Promise<SubResult & { in: number; out: number }> => {
     const label = s.lane ?? s.title;
     try {
-      const resp = await client.messages.create({
-        model: MODEL_LEAF, max_tokens: AGENT_MAX_TOKENS,
-        system: cachedSystem(SELFHIVE_DOCTRINE),
-        messages: [{ role: 'user', content: buildSubAgentPrompt(lead.taskContract, label, s.taskContract) }],
-      });
+      const resp = await callModel(
+        { userId, runId, nodeId: s.id, role: s.role, phase: 'layer' },
+        {
+          model: MODEL_LEAF, max_tokens: AGENT_MAX_TOKENS,
+          system: cachedSystem(SELFHIVE_DOCTRINE),
+          messages: [{ role: 'user', content: buildSubAgentPrompt(lead.taskContract, label, s.taskContract) }],
+        },
+      );
       const tb = resp.content.find((b) => b.type === 'text');
       const { output } = extractLeaf(tb && 'text' in tb ? tb.text : '');
       return { lane: label, output, in: resp.usage?.input_tokens ?? 0, out: resp.usage?.output_tokens ?? 0 };
@@ -400,6 +442,7 @@ export async function runLeadImpl(
     emit, problem, [lead], priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5',
     customAgents, bundle, overlays, true,
     { header: buildSubteamHeader(simple), context: buildSubteamContext(simple) },
+    { userId, runId, phase: 'layer' },
   );
   const r = results[0];
   const { prose, output } = extractLeaf(r.content);
@@ -407,7 +450,7 @@ export async function runLeadImpl(
   const sb = getAdminSupabase();
   try {
     await recordArtifact(sb, { runId, nodeId: r.id, kind: 'leaf', content: prose, summary: output.summary, structured: output, tokens: r.out + subOut });
-    await reserveBudget(sb, runId, r.id, `spend:${r.id}:${r.in + subIn}:${r.out + subOut}`, r.usd + subUsd, 'lead+subteam');
+    await settleSpend(sb, runId, r.id, `spend:${r.id}:${r.in + subIn}:${r.out + subOut}`, r.usd + subUsd, 'lead+subteam');
     await setNodeStatus(sb, runId, r.id, 'done');
     for (const s of lanes) await setNodeStatus(sb, runId, s.id, 'done'); // sub-lanes folded → done
   } catch { /* bookkeeping never breaks a run */ }
@@ -428,6 +471,8 @@ export async function reduceImpl(
   plan: TeamPlan,
   outputs: Record<string, { title: string; content: string }>,
 ): Promise<{ outputs: Record<string, { title: string; content: string }>; cost: StepCost }> {
+  if (!isAIEnabled()) return { outputs, cost: { ...ZERO_COST } };
+
   const squads = squadsByRole(plan.agents);
   if (squads.size === 0) return { outputs, cost: { ...ZERO_COST } };
 
@@ -449,12 +494,15 @@ export async function reduceImpl(
 
     let merged = '';
     try {
-      const resp = await client.messages.create({
-        model: MODEL_LEAD,
-        max_tokens: MAX_TOKENS_LEAD_REDUCE,
-        system: cachedSystem(SELFHIVE_DOCTRINE),
-        messages: [{ role: 'user', content: buildReduceContext(role, lanes) }],
-      });
+      const resp = await callModel(
+        { runId, role: 'reducer', phase: 'layer', nodeId: `${role}__reduced` },
+        {
+          model: MODEL_LEAD,
+          max_tokens: MAX_TOKENS_LEAD_REDUCE,
+          system: cachedSystem(SELFHIVE_DOCTRINE),
+          messages: [{ role: 'user', content: buildReduceContext(role, lanes) }],
+        },
+      );
       const tb = resp.content.find((b) => b.type === 'text');
       merged = tb && 'text' in tb ? tb.text : '';
       cost = addCost(cost, {
@@ -491,6 +539,8 @@ export async function reinforceImpl(
   customAgents: Record<string, Specialist>, bundle: ResourceBundle | undefined,
   costMode: boolean, userId: string | null, classification: string | null,
 ): Promise<{ outputs: Record<string, { title: string; content: string }>; newAgents: PlannedAgent[]; cost: StepCost }> {
+  if (!isAIEnabled()) return { outputs, newAgents: [], cost: ZERO_COST };
+
   const emit = await makeEmitter(runId);
 
   // 1. Collect requests + strip tags from existing outputs (return cleaned ones).
@@ -514,11 +564,14 @@ export async function reinforceImpl(
   await emit('cos_start');
   let reRaw = ''; let cost: StepCost = { ...ZERO_COST };
   try {
-    const re = await client.messages.create({
-      model: 'claude-sonnet-4-5', max_tokens: 2000,
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, requests, budget.approved)),
-      messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
-    });
+    const re = await callModel(
+      { userId, runId, role: 'chief_of_staff', phase: 'backfire' },
+      {
+        model: 'claude-sonnet-4-5', max_tokens: 2000,
+        system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, requests, budget.approved)),
+        messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
+      },
+    );
     const tb = re.content.find((b) => b.type === 'text');
     reRaw = tb && 'text' in tb ? tb.text : '';
     cost = { in: re.usage?.input_tokens ?? 0, out: re.usage?.output_tokens ?? 0, usd: costUsd('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0) };
@@ -531,7 +584,10 @@ export async function reinforceImpl(
 
   // 4. Execute the reinforcements as one layer (deps may point at existing outputs).
   const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(newAgents.map((a) => a.role))], classification, problem);
-  const results = await executeAgents(emit, problem, newAgents, { ...outputs, ...cleaned }, (a) => capabilityFloor(a), customAgents, bundle, overlaysByAgent);
+  const results = await executeAgents(
+    emit, problem, newAgents, { ...outputs, ...cleaned }, (a) => capabilityFloor(a), customAgents, bundle, overlaysByAgent,
+    undefined, undefined, { userId, runId, phase: 'backfire' },
+  );
 
   const merged: Record<string, { title: string; content: string }> = { ...cleaned };
   for (const r of results) {
@@ -543,11 +599,86 @@ export async function reinforceImpl(
   return { outputs: merged, newAgents, cost };
 }
 
+// ─── STEP 2.5: Editor — non-destructive presentation layer ────────────
+// Formats each agent (and later the final answer) into a family contract.
+// Critic / Synthesizer / Trainer continue to read RAW outputs only.
+export async function formatImpl(
+  runId: string,
+  agents: { id: string; role: string; title: string }[],
+  outputs: Record<string, { title: string; content: string }>,
+  userId: string | null = null,
+  opts: { finalAnswer?: string } = {},
+): Promise<{ formatted: Record<string, string>; gaps: string[]; cost: StepCost }> {
+  if (!isAIEnabled()) return { formatted: {}, gaps: [], cost: ZERO_COST };
+
+  const emit = await makeEmitter(runId);
+  const formatted: Record<string, string> = {};
+  const gaps: string[] = [];
+  let cost: StepCost = { ...ZERO_COST };
+  const sb = isElastic() ? getAdminSupabase() : null;
+
+  const jobs: { id: string; role: string; title: string; source: string }[] = agents
+    .filter((a) => outputs[a.id]?.content)
+    .map((a) => ({ id: a.id, role: a.role, title: a.title, source: outputs[a.id].content }));
+
+  if (opts.finalAnswer && opts.finalAnswer.length >= EDITOR_MIN_SOURCE_CHARS) {
+    jobs.push({ id: 'synthesizer', role: 'synthesizer', title: 'Final Answer', source: opts.finalAnswer });
+  }
+
+  await Promise.all(jobs.map(async (job) => {
+    if (job.source.length < EDITOR_MIN_SOURCE_CHARS) return;
+    const { prose, json } = extractFiguresTail(job.source);
+    const family = familyFor(job.role);
+    try {
+      const resp = await callModel(
+        { userId, runId, nodeId: job.id, role: EDITOR_ID, phase: 'format' },
+        {
+          model: EDITOR_MODEL,
+          max_tokens: EDITOR_MAX_TOKENS,
+          system: cachedSystem(editorSystemPrompt(family)),
+          messages: [{ role: 'user', content: buildEditorUserMessage({ role: job.role, title: job.title, source: prose, figuresJson: json }) }],
+        },
+        { maxRetries: 3, timeout: 60_000 },
+      );
+      const tb = resp.content.find((b) => b.type === 'text');
+      let text = tb && 'text' in tb ? tb.text.trim() : '';
+      const check = verifyNoNewFacts(prose, text);
+      if (check.gaps.length) gaps.push(...check.gaps.map((g) => `${job.id}: ${g}`));
+      if (!check.ok && check.inventedNumbers.length) {
+        text += `\n\n> [editor-note: stripped unverified figures: ${check.inventedNumbers.slice(0, 5).join(', ')}]`;
+      }
+      if (!text) return;
+      formatted[job.id] = text;
+      cost = addCost(cost, {
+        usd: costUsd(EDITOR_MODEL, resp.usage ?? {}),
+        in: resp.usage?.input_tokens ?? 0,
+        out: resp.usage?.output_tokens ?? 0,
+      });
+      await emit('agent_formatted', { agentId: job.id, content: text, family });
+      if (sb) {
+        try {
+          await recordArtifact(sb, { runId, nodeId: job.id, kind: 'formatted', content: text, tokens: resp.usage?.output_tokens ?? 0 });
+        } catch { /* non-fatal */ }
+      }
+    } catch {
+      /* Editor failure = ugly tile, never a wrong answer */
+    }
+  }));
+
+  if (gaps.length) {
+    await emit('editor_gaps', { gaps: gaps.slice(0, 40) });
+  }
+
+  return { formatted, gaps, cost };
+}
+
 // ─── STEP 3: critic (with HIVE IMMUNE MEMORY) ─────────────────────────
 export async function criticImpl(
   runId: string, problem: string, outputs: Record<string, { title: string; content: string }>,
   bundle?: ResourceBundle, userId: string | null = null, classification: string | null = null,
 ) {
+  if (!isAIEnabled()) return { critique: '', cost: ZERO_COST };
+
   const emit = await makeEmitter(runId);
   await emit('critic_start');
   const team = Object.values(outputs);
@@ -557,7 +688,7 @@ export async function criticImpl(
   const antibodyMap = await loadActiveOverlaysForAgents(userId, [ANTIBODY_AGENT_ID], classification, problem);
   const immuneMemory = formatAntibodiesForPrompt(antibodyMap[ANTIBODY_AGENT_ID] ?? []);
   let critique = ''; let inTok = 0; let outTok = 0;
-  const stream = client.messages.stream({
+  const stream = getAnthropic().messages.stream({
     model: 'claude-sonnet-4-5', max_tokens: CRITIC_MAX_TOKENS,
     system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + immuneMemory + criticEffect.systemPromptAddition),
     messages: [{ role: 'user', content: buildCriticContext(problem, team) }],
@@ -571,19 +702,25 @@ export async function criticImpl(
       await emit('agent_delta', { agentId: 'critic', delta: ev.delta.text });
     }
   }
+  await recordCall({ userId, runId, nodeId: 'critic', role: 'critic', phase: 'critic', model: 'claude-sonnet-4-5', usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
   await emit('agent_done', { agentId: 'critic', artifact: critique });
   return { critique, cost: { in: inTok, out: outTok, usd: costUsd('claude-sonnet-4-5', inTok, outTok) } };
 }
 
 // ─── STEP 4: synthesize → answer ──────────────────────────────────────
-export async function synthesizeImpl(runId: string, problem: string, outputs: Record<string, { title: string; content: string }>, critique: string, isRegulated: boolean, bundle?: ResourceBundle) {
+export async function synthesizeImpl(
+  runId: string, problem: string, outputs: Record<string, { title: string; content: string }>, critique: string,
+  isRegulated: boolean, bundle?: ResourceBundle, userId: string | null = null,
+) {
+  if (!isAIEnabled()) return { answer: '', cost: ZERO_COST };
+
   const emit = await makeEmitter(runId);
   await emit('synthesis_start');
   const team = Object.values(outputs);
   const ctx = buildSynthesizerContext(problem, team) + `\n\n--- CRITIC'S CHALLENGE (address it) ---\n${critique}`;
   const synthEffect = effectFor(bundle, 'synthesizer');
   let answer = ''; let inTok = 0; let outTok = 0;
-  const stream = client.messages.stream({
+  const stream = getAnthropic().messages.stream({
     model: SYNTHESIZER_MODEL, max_tokens: SYNTH_MAX_TOKENS,
     system: cachedSystem(synthesizerSystemPrompt(isRegulated) + loadFounderManifest() + synthEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
@@ -597,6 +734,7 @@ export async function synthesizeImpl(runId: string, problem: string, outputs: Re
       await emit('agent_delta', { agentId: 'synthesizer', delta: ev.delta.text });
     }
   }
+  await recordCall({ userId, runId, nodeId: 'synthesizer', role: 'synthesizer', phase: 'synthesize', model: SYNTHESIZER_MODEL, usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
   if (isRegulated && !answer.includes(DISCLAIMER)) {
     const tail = `\n\n---\n${DISCLAIMER}`;
     answer += tail;
@@ -609,8 +747,11 @@ export async function synthesizeImpl(runId: string, problem: string, outputs: Re
 // ─── STEP 5: trainer ──────────────────────────────────────────────────
 export async function trainerImpl(
   runId: string, problem: string, plan: TeamPlan,
-  outputs: Record<string, { title: string; content: string }>, answer: string, trainerHistory: string, bundle?: ResourceBundle
+  outputs: Record<string, { title: string; content: string }>, answer: string, trainerHistory: string, bundle?: ResourceBundle,
+  userId: string | null = null,
 ) {
+  if (!isAIEnabled()) return { report: '', cost: ZERO_COST };
+
   const emit = await makeEmitter(runId);
   await emit('trainer_start');
   const ctx = buildDynamicTrainerContext(
@@ -620,7 +761,7 @@ export async function trainerImpl(
   ) + trainerHistory;
   const trainerEffect = effectFor(bundle, 'trainer');
   let report = ''; let inTok = 0; let outTok = 0;
-  const stream = client.messages.stream({
+  const stream = getAnthropic().messages.stream({
     model: TRAINER_MODEL, max_tokens: TRAINER_MAX_TOKENS,
     system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt() + trainerEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
@@ -634,6 +775,7 @@ export async function trainerImpl(
       await emit('agent_delta', { agentId: 'trainer', delta: ev.delta.text });
     }
   }
+  await recordCall({ userId, runId, nodeId: 'trainer', role: 'trainer', phase: 'trainer', model: TRAINER_MODEL, usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
   await emit('trainer_done', { agentId: 'trainer', artifact: report });
   return { report, cost: { in: inTok, out: outTok, usd: costUsd(TRAINER_MODEL, inTok, outTok) } };
 }
@@ -656,6 +798,7 @@ export async function distillImpl(
   planAgents: { id: string; role: string; title: string }[],
   trainerReport: string,
 ): Promise<{ inserted: number; promoted: number; skipped: boolean }> {
+  if (!isAIEnabled()) return { inserted: 0, promoted: 0, skipped: true };
   if (!userId || !trainerReport || planAgents.length === 0) {
     return { inserted: 0, promoted: 0, skipped: true };
   }
@@ -672,18 +815,21 @@ export async function distillImpl(
 
   let parsed = '';
   try {
-    const resp = await client.messages.create({
-      model: 'claude-haiku-4-5', max_tokens: 1024,
-      // The distiller attributes advice against the INSTANCE roster (so it can map
-      // each lane's trainer block to an id); storage is remapped to role below.
-      // Existing learnings are keyed by ROLE — the distiller treats them as
-      // covered for every lane of that role.
-      system: cachedSystem(distillerSystemPrompt(
-        planAgents.map((a) => ({ id: a.id, title: a.title })),
-        { existingByAgent, founderMission: loadFounderManifest() },
-      )),
-      messages: [{ role: 'user', content: `TRAINER REPORT (just delivered):\n\n${trainerReport}\n\nEmit the JSON array now.` }],
-    });
+    const resp = await callModel(
+      { userId, runId, role: 'distiller', phase: 'trainer' },
+      {
+        model: 'claude-haiku-4-5', max_tokens: 1024,
+        // The distiller attributes advice against the INSTANCE roster (so it can map
+        // each lane's trainer block to an id); storage is remapped to role below.
+        // Existing learnings are keyed by ROLE — the distiller treats them as
+        // covered for every lane of that role.
+        system: cachedSystem(distillerSystemPrompt(
+          planAgents.map((a) => ({ id: a.id, title: a.title })),
+          { existingByAgent, founderMission: loadFounderManifest() },
+        )),
+        messages: [{ role: 'user', content: `TRAINER REPORT (just delivered):\n\n${trainerReport}\n\nEmit the JSON array now.` }],
+      },
+    );
     const tb = resp.content.find((b) => b.type === 'text');
     parsed = tb && 'text' in tb ? tb.text : '';
   } catch {
@@ -714,7 +860,39 @@ export async function distillImpl(
   // becomes each new overlay's retrieval key (context embedding).
   const res = await insertOverlays(userId, runId, classification, finalItems, problem);
   const promoted = (res.inserted + res.reinforced) > 0 ? await promotePinsForUser(userId, classification) : 0;
+  if (res.inserted + res.reinforced > 0) {
+    await auditOverlayWrites(userId, runId, 'distiller', classification, finalItems);
+  }
   return { inserted: res.inserted, promoted: promoted + res.pinnedByReinforcement, skipped: false };
+}
+
+// AUDIT TRAIL (Phase 0.9): the distiller/immunizer auto-mutate overlays without
+// approval (gated only by the founder's /training kill switch), but every
+// auto-application still lands an ALREADY-APPROVED change_request so
+// /approvals' "recent" tab shows the hive's complete self-modification history,
+// not just what a human had to sign off on. Best-effort — never breaks the run.
+async function auditOverlayWrites(
+  userId: string,
+  runId: string,
+  originAgent: 'distiller' | 'immunizer',
+  classification: string | null,
+  items: DistilledOverlay[],
+): Promise<void> {
+  try {
+    await Promise.all(items.map((it) => auditAutoApproved({
+      userId,
+      kind: 'overlay',
+      originAgent,
+      originRunId: runId,
+      target: it.agentId,
+      title: `${originAgent === 'distiller' ? 'Learning' : 'Antibody'} for ${it.agentId}`,
+      rationale: it.adviceText,
+      payload: { agentId: it.agentId, category: it.category, adviceText: it.adviceText, sourceScore: it.sourceScore, classification },
+      evidence: { classification, sourceScore: it.sourceScore },
+    })));
+  } catch {
+    /* audit trail must never break a run */
+  }
 }
 
 // ─── STEP 6b: IMMUNIZE — distill the critic's critique into hive ANTIBODIES ──
@@ -731,6 +909,7 @@ export async function immunizeImpl(
   classification: string,
   critique: string,
 ): Promise<{ inserted: number; promoted: number; skipped: boolean }> {
+  if (!isAIEnabled()) return { inserted: 0, promoted: 0, skipped: true };
   if (!userId || !critique || critique.trim().length < 40) return { inserted: 0, promoted: 0, skipped: true };
   const settings = await getUserSettingsAdmin(userId);
   if (!settings.autoMutateEnabled) return { inserted: 0, promoted: 0, skipped: true };
@@ -745,11 +924,14 @@ export async function immunizeImpl(
 
   let parsed = '';
   try {
-    const resp = await client.messages.create({
-      model: 'claude-haiku-4-5', max_tokens: 1024,
-      system: cachedSystem(immunizerSystemPrompt(existingAntibodies)),
-      messages: [{ role: 'user', content: `CRITIC'S RED-TEAM CRITIQUE (just delivered):\n\n${critique}\n\nEmit the antibody JSON array now.` }],
-    });
+    const resp = await callModel(
+      { userId, runId, role: 'immunizer', phase: 'critic' },
+      {
+        model: 'claude-haiku-4-5', max_tokens: 1024,
+        system: cachedSystem(immunizerSystemPrompt(existingAntibodies)),
+        messages: [{ role: 'user', content: `CRITIC'S RED-TEAM CRITIQUE (just delivered):\n\n${critique}\n\nEmit the antibody JSON array now.` }],
+      },
+    );
     const tb = resp.content.find((b) => b.type === 'text');
     parsed = tb && 'text' in tb ? tb.text : '';
   } catch {
@@ -769,6 +951,9 @@ export async function immunizeImpl(
 
   const res = await insertOverlays(userId, runId, classification, antibodies, problem);
   const promoted = (res.inserted + res.reinforced) > 0 ? await promotePinsForUser(userId, classification) : 0;
+  if (res.inserted + res.reinforced > 0) {
+    await auditOverlayWrites(userId, runId, 'immunizer', classification, antibodies);
+  }
   return { inserted: res.inserted, promoted: promoted + res.pinnedByReinforcement, skipped: false };
 }
 
@@ -825,8 +1010,12 @@ export async function finalizeImpl(
       const outcome = await recordSpawnedWorkforce({
         userId, runId, classification: plan.classification, spawnedAgents, scores: trainerScores,
       });
-      if (outcome.promoted.length || outcome.retired.length) {
-        await emit('workforce_update', { promoted: outcome.promoted, retired: outcome.retired });
+      if (outcome.promoted.length || outcome.promotionsRequested.length || outcome.retired.length) {
+        await emit('workforce_update', {
+          promoted: outcome.promoted,
+          promotionsRequested: outcome.promotionsRequested,
+          retired: outcome.retired,
+        });
       }
     } catch { /* non-fatal — bookkeeping must never break a run */ }
   }

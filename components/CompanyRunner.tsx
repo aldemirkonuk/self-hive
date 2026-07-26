@@ -41,7 +41,13 @@ function patchAgent(
   return { ...prev, [id]: { ...cur, ...patch, lastTick: Date.now() } };
 }
 
-export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string }) {
+export default function CompanyRunner({
+  resumeJobId,
+  aiPaused = false,
+}: {
+  resumeJobId?: string;
+  aiPaused?: boolean;
+}) {
   // ── input + run identity ──
   const [problem, setProblem] = useState('');
   const [jobId, setJobId] = useState<string | null>(resumeJobId ?? null);
@@ -55,6 +61,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
   const [criticBody, setCriticBody] = useState('');
   const [synBody, setSynBody] = useState('');
   const [answer, setAnswer] = useState('');
+  const [answerFormatted, setAnswerFormatted] = useState('');
   const [trainerBody, setTrainerBody] = useState('');
   const [trainerDone, setTrainerDone] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -216,6 +223,17 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
       case 'agent_content': {
         const id = String(p.agentId);
         setAgents((prev) => patchAgent(prev, id, { content: String(p.content ?? ''), status: 'working' }));
+        break;
+      }
+
+      case 'agent_formatted': {
+        const id = String(p.agentId);
+        const content = String(p.content ?? '');
+        if (id === 'synthesizer') {
+          setAnswerFormatted(content);
+        } else {
+          setAgents((prev) => patchAgent(prev, id, { formatted: content }));
+        }
         break;
       }
 
@@ -420,6 +438,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
     setCriticBody('');
     setSynBody('');
     setAnswer('');
+    setAnswerFormatted('');
     setTrainerBody('');
     setTrainerDone(false);
     setRunStartedAt(null);
@@ -440,7 +459,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
   };
 
   const run = async () => {
-    if (!problem.trim() || running) return;
+    if (aiPaused || !problem.trim() || running) return;
     resetState();
     setRunning(true);
     setRunStartedAt(Date.now());
@@ -477,6 +496,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
       running={running}
       errorMsg={errorMsg}
       answer={answer}
+      answerFormatted={answerFormatted}
       jobId={jobId}
       runStartedAt={runStartedAt}
       completedAt={completedAt}
@@ -486,6 +506,7 @@ export default function CompanyRunner({ resumeJobId }: { resumeJobId?: string })
       setProblem={setProblem}
       onSubmit={run}
       onNewRun={startFresh}
+      aiPaused={aiPaused}
     />
   );
 }

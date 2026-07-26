@@ -86,6 +86,15 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     total = sum(total, reinforced.cost);
     if (reinforced.newAgents.length) plan.agents = [...plan.agents, ...reinforced.newAgents];
 
+    // EDITOR: presentation layer (non-destructive). Critic/synth still see raw.
+    const formatted = await formatStep(
+      input.runId,
+      plan.agents.map((a) => ({ id: a.id, role: a.role, title: a.title })),
+      outputs,
+      input.userId,
+    );
+    total = sum(total, formatted.cost);
+
     // ELASTIC reduce: collapse each squad into one briefing so the critic + synth
     // see bounded context. No-op (pass-through) when the flag is off. The TRAINER
     // still scores the full per-lane `outputs`.
@@ -94,9 +103,20 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
 
     const crit = await criticStep(input.runId, input.problem, reduced.outputs, input.resourceBundle, input.userId, plan.classification);
     total = sum(total, crit.cost);
-    const synth = await synthesizeStep(input.runId, input.problem, reduced.outputs, crit.critique, plan.isRegulatedFinance, input.resourceBundle);
+    const synth = await synthesizeStep(input.runId, input.problem, reduced.outputs, crit.critique, plan.isRegulatedFinance, input.resourceBundle, input.userId);
     total = sum(total, synth.cost);
-    const train = await trainerStep(input.runId, input.problem, plan, outputs, synth.answer, input.trainerHistory, input.resourceBundle);
+
+    // EDITOR final pass on the synthesized answer (what humans read by default).
+    const formatFinal = await formatStep(
+      input.runId,
+      [],
+      {},
+      input.userId,
+      synth.answer,
+    );
+    total = sum(total, formatFinal.cost);
+
+    const train = await trainerStep(input.runId, input.problem, plan, outputs, synth.answer, input.trainerHistory, input.resourceBundle, input.userId);
     total = sum(total, train.cost);
 
     // Auto-mutation loop: distill trainer advice → store as overlays → promote pins.
@@ -168,6 +188,17 @@ async function reinforceStep(
   const { reinforceImpl } = await import('@/lib/jobs/step-impl');
   return reinforceImpl(runId, problem, plan, outputs, customAgents, bundle, costMode, userId ?? null, classification);
 }
+async function formatStep(
+  runId: string,
+  agents: { id: string; role: string; title: string }[],
+  outputs: Outputs,
+  userId?: string | null,
+  finalAnswer?: string,
+) {
+  'use step';
+  const { formatImpl } = await import('@/lib/jobs/step-impl');
+  return formatImpl(runId, agents, outputs, userId ?? null, { finalAnswer });
+}
 async function criticStep(runId: string, problem: string, outputs: Outputs, bundle?: ResourceBundle, userId?: string | null, classification?: string) {
   'use step';
   const { criticImpl } = await import('@/lib/jobs/step-impl');
@@ -178,15 +209,15 @@ async function immunizeStep(runId: string, userId: string | null, problem: strin
   const { immunizeImpl } = await import('@/lib/jobs/step-impl');
   return immunizeImpl(runId, userId, problem, classification, critique);
 }
-async function synthesizeStep(runId: string, problem: string, outputs: Outputs, critique: string, isRegulated: boolean, bundle?: ResourceBundle) {
+async function synthesizeStep(runId: string, problem: string, outputs: Outputs, critique: string, isRegulated: boolean, bundle?: ResourceBundle, userId?: string | null) {
   'use step';
   const { synthesizeImpl } = await import('@/lib/jobs/step-impl');
-  return synthesizeImpl(runId, problem, outputs, critique, isRegulated, bundle);
+  return synthesizeImpl(runId, problem, outputs, critique, isRegulated, bundle, userId ?? null);
 }
-async function trainerStep(runId: string, problem: string, plan: TeamPlan, outputs: Outputs, answer: string, history: string, bundle?: ResourceBundle) {
+async function trainerStep(runId: string, problem: string, plan: TeamPlan, outputs: Outputs, answer: string, history: string, bundle?: ResourceBundle, userId?: string | null) {
   'use step';
   const { trainerImpl } = await import('@/lib/jobs/step-impl');
-  return trainerImpl(runId, problem, plan, outputs, answer, history, bundle);
+  return trainerImpl(runId, problem, plan, outputs, answer, history, bundle, userId ?? null);
 }
 async function finalizeStep(runId: string, userId: string | null, plan: TeamPlan, answer: string, report: string, totalCost: Cost) {
   'use step';

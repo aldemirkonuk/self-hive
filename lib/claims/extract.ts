@@ -7,9 +7,7 @@
 // a real graded row — not the hive grading itself. parseClaims is pure and tested
 // in isolation; extractClaims wraps it around a cheap Haiku call.
 
-import Anthropic from '@anthropic-ai/sdk';
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+import { callModel, AIDisabledError, isAIEnabled } from '@/lib/ai/client';
 
 export interface RawClaim {
   claim: string;
@@ -53,8 +51,13 @@ export function parseClaims(text: string): RawClaim[] {
  * Extract falsifiable claims from a non-markets answer. Returns [] when nothing
  * is concretely checkable (the honest default — better no claim than a vague one).
  */
-export async function extractClaims(answer: string, domain: string): Promise<RawClaim[]> {
+export async function extractClaims(
+  answer: string,
+  domain: string,
+  meter?: { userId?: string | null; runId?: string | null },
+): Promise<RawClaim[]> {
   if (!answer || answer.length < 80) return [];
+  if (!isAIEnabled()) return [];
 
   const system = `You extract concrete, FALSIFIABLE claims from an analysis or recommendation so they can later be judged TRUE or FALSE against reality by a human reviewer.
 Return ONLY a JSON array (no prose, no fences). Each item:
@@ -68,16 +71,26 @@ Rules:
 - Max 5 claims. If nothing is concretely checkable, return [].`;
 
   try {
-    const res = await client.messages.create({
-      model: 'claude-haiku-4-5',
-      max_tokens: 800,
-      system,
-      messages: [{ role: 'user', content: `Domain: ${domain}\n\nExtract falsifiable claims from this answer:\n\n${answer.slice(0, 6000)}` }],
-    });
+    const res = await callModel(
+      {
+        userId: meter?.userId,
+        runId: meter?.runId,
+        role: 'extract_claims',
+        phase: 'extract',
+      },
+      {
+        model: 'claude-haiku-4-5',
+        max_tokens: 800,
+        system,
+        messages: [{ role: 'user', content: `Domain: ${domain}\n\nExtract falsifiable claims from this answer:\n\n${answer.slice(0, 6000)}` }],
+      },
+      { maxRetries: 3, timeout: 60_000 },
+    );
     const block = res.content.find((b) => b.type === 'text');
     const text = block && 'text' in block ? block.text : '[]';
     return parseClaims(text);
-  } catch {
+  } catch (e) {
+    if (e instanceof AIDisabledError) return [];
     return [];
   }
 }

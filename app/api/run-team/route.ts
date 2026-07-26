@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { isAIEnabled } from '@/lib/ai/client';
 import { runTeam } from '@/lib/orchestrator';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { createRunRecord, saveArtifact, markRunComplete, saveTrainerReport, recordEarnings } from '@/lib/db/runs';
@@ -110,6 +111,8 @@ export async function POST(req: NextRequest) {
   if (trimmed.length > MAX_PROBLEM_LEN) {
     return jsonError(400, `Problem must be at most ${MAX_PROBLEM_LEN} characters.`);
   }
+
+  if (!isAIEnabled()) return jsonError(503, 'AI_DISABLED');
 
   // CR-03 partial: clamp runCount to a sane range so a hostile client can't
   // pin every run to wildcard mode. Server-side persistence is a future fix.

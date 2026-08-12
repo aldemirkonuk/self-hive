@@ -1,0 +1,54 @@
+name: Daily digest + goal review
+
+# SELFHIVE writing its own operating log, then deciding what it works toward
+# next. Vercel cron does not fire on the free plan, so — like the autonomous
+# cycle — the cadence is driven from GitHub Actions.
+#
+# Fires at 14:00 UTC (9:00 AM CDT). That is deliberately AFTER the autonomous
+# cycle's last run of the day (13:00 UTC), and the digest covers a trailing
+# 24h window — so it captures that same morning's six runs while they are
+# still fresh, rather than reporting them ~14h stale the next day.
+# Times drift by 1h across DST since cron is fixed UTC.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   • Secret   CRON_SECRET         — must equal the CRON_SECRET in your Vercel env
+#   • Variable SELFHIVE_PROD_URL   — your production origin, e.g. https://selfhive.vercel.app
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 9:00 AM CDT — after the day's autonomous runs
+  workflow_dispatch:
+
+# Never let two digests overlap; the upsert is idempotent but a double run
+# would pay for two narrator calls.
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Trigger daily digest + goal review
+        env:
+          PROD_URL: ${{ vars.SELFHIVE_PROD_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$PROD_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "::error::Missing SELFHIVE_PROD_URL (repo variable) or CRON_SECRET (repo secret). See workflow header."
+            exit 1
+          fi
+          echo "Triggering daily digest at $(date -u '+%Y-%m-%d %H:%M:%S UTC')…"
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' \
+            -X POST "${PROD_URL%/}/api/cron/daily-digest" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            --max-time 300)
+          echo "HTTP $code"
+          echo "Response:"; cat /tmp/resp.json 2>/dev/null || true; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Daily digest failed (HTTP $code)"
+            exit 1
+          fi
+          echo "✓ Daily digest triggered."

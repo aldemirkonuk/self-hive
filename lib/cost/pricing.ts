@@ -11,7 +11,12 @@ export interface ModelPricing {
 }
 
 export const PRICING: Record<string, ModelPricing> = {
-  'claude-sonnet-4-5': { in: 3, out: 15, cacheWrite: 3.75, cacheRead: 0.3 },
+  // Standard rate. Anthropic is running an introductory $2/$10 rate on Sonnet 5
+  // through 2026-08-31 — deliberately NOT reflected here, so the CFO's budget
+  // math stays conservative (slightly over-estimates current spend) instead of
+  // silently drifting wrong the day the intro window ends and nobody remembers
+  // to bump this back up.
+  'claude-sonnet-5': { in: 3, out: 15, cacheWrite: 3.75, cacheRead: 0.3 },
   'claude-haiku-4-5': { in: 1, out: 5, cacheWrite: 1.25, cacheRead: 0.1 },
   'claude-opus-4-8': { in: 15, out: 75, cacheWrite: 18.75, cacheRead: 1.5 },
 };
@@ -31,7 +36,7 @@ export function costUsd(
   usageOrIn: UsageLike | number,
   outTok?: number,
 ): number {
-  const p = PRICING[model] ?? PRICING['claude-sonnet-4-5'];
+  const p = PRICING[model] ?? PRICING['claude-sonnet-5'];
   if (typeof usageOrIn === 'number') {
     return (usageOrIn * p.in + (outTok ?? 0) * p.out) / 1_000_000;
   }

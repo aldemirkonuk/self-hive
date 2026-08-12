@@ -19,7 +19,11 @@ export type ChangeRequestKind =
   | 'curriculum_source'
   | 'agent_promotion'
   | 'canon_doc'
-  | 'code_patch';
+  | 'code_patch'
+  // A standing objective the hive set for itself (migration 0013). Applied
+  // autonomously like an overlay, but audited here so /approvals stays the one
+  // place the founder sees everything the hive changed about itself.
+  | 'goal';
 
 export type ChangeRequestStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
 

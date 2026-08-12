@@ -63,8 +63,12 @@ What is the single best markets problem to work on today? One sentence.`;
     const res = await callModel(
       { userId, role: 'ceo', phase: 'compose' },
       {
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-5',
         max_tokens: 300,
+        // 300-token budget for a single sentence — adaptive thinking (on by
+        // default for Sonnet 5) would eat straight into that. Preserve prior
+        // (thinking-off) behavior.
+        thinking: { type: 'disabled' },
         system,
         messages: [{ role: 'user', content: user }],
       },

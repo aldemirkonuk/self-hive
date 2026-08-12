@@ -1,4 +1,5 @@
 import { getAnthropic, isAIEnabled, AIDisabledError } from '@/lib/ai/client';
+import { splitCachedSystem } from '@/lib/ai/prompt-cache';
 import { AGENTS } from './agents';
 import { loadCanonFor, loadFounderManifest } from './canon-loader';
 import { RUBRICS, RUBRIC_DESCRIPTIONS } from './trainer/rubrics';
@@ -115,11 +116,13 @@ export async function* runTeam(
     const founderContext = role === 'ceo' ? loadFounderManifest() : '';
     const canonContext = loadCanonFor(role);
 
-    const systemPrompt =
-      config.basePrompt +
+    // STABLE: identical for this role on every run (basePrompt/canon/manifest
+    // don't change per invocation) — gets the cache breakpoint. VOLATILE:
+    // persona rotates by runCount and challenge mode is occasional, so both
+    // stay uncached, after the breakpoint (see lib/ai/prompt-cache.ts).
+    const stableSystem = config.basePrompt + founderContext + canonContext;
+    const volatileSystem =
       personaVariant.injection +
-      founderContext +
-      canonContext +
       (isWildcard
         ? '\n\n[CHALLENGE MODE] Push back harder than usual on every input. Find the weak point and make it the central issue of your output.'
         : '');
@@ -136,9 +139,14 @@ export async function* runTeam(
     try {
       const stream = getAnthropic().messages.stream(
         {
-          model: 'claude-sonnet-4-5',
+          model: 'claude-sonnet-5',
           max_tokens: AGENT_MAX_TOKENS,
-          system: systemPrompt,
+          // Sonnet 5 runs adaptive thinking by default when this is omitted
+          // (Sonnet 4.5 never thought unless asked) — explicitly disabled to
+          // preserve prior behavior and keep the full AGENT_MAX_TOKENS budget
+          // for the actual deliverable, not reasoning tokens.
+          thinking: { type: 'disabled' },
+          system: splitCachedSystem(stableSystem, volatileSystem),
           messages: [{ role: 'user', content: buildContext(role, problem, artifacts, trainerHistory) }],
         },
         { signal } // HI-04: thread abort signal into Anthropic SDK

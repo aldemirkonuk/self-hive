@@ -77,8 +77,8 @@ export const SUBTEAM_MAX = 8;
 // Model tiers. Haiku does the wide leaf work; Sonnet leads, critiques, reduces
 // and synthesizes; Opus only synthesizes flagship runs.
 export const MODEL_LEAF = 'claude-haiku-4-5';
-export const MODEL_LEAD = 'claude-sonnet-4-5';
-export const MODEL_SYNTH = 'claude-sonnet-4-5';
+export const MODEL_LEAD = 'claude-sonnet-5';
+export const MODEL_SYNTH = 'claude-sonnet-5';
 export const MODEL_FLAGSHIP_SYNTH = 'claude-opus-4-8';
 
 // Max children a node at `depth` may fan out to. Beyond the table → leaf (no

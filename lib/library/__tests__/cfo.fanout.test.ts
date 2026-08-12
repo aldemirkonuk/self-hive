@@ -95,6 +95,6 @@ test('CTO floor is role-keyed: a quant fan-out lane keeps the Sonnet floor of it
       dependsOn: [],
       needsLiveData: true,
     }),
-    'claude-sonnet-4-5'
+    'claude-sonnet-5'
   );
 });

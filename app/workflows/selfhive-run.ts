@@ -22,14 +22,22 @@ export interface WorkflowInput {
  * survives deployments/crashes. The 'use workflow' body must stay pure (no
  * Node modules); all Node-heavy work is dynamically imported INSIDE steps.
  */
-type Cost = { usd: number; in: number; out: number };
-const sum = (a: Cost, b: Cost): Cost => ({ usd: a.usd + b.usd, in: a.in + b.in, out: a.out + b.out });
+// Carries the cache buckets too: every step already reports them, and dropping
+// them here is what made run_costs record 0 cache activity for every run.
+type Cost = { usd: number; in: number; out: number; cacheRead?: number; cacheWrite?: number };
+const sum = (a: Cost, b: Cost): Cost => ({
+  usd: a.usd + b.usd,
+  in: a.in + b.in,
+  out: a.out + b.out,
+  cacheRead: (a.cacheRead ?? 0) + (b.cacheRead ?? 0),
+  cacheWrite: (a.cacheWrite ?? 0) + (b.cacheWrite ?? 0),
+});
 
 export async function runSelfhiveWorkflow(input: WorkflowInput) {
   'use workflow';
 
   try {
-    let total: Cost = { usd: 0, in: 0, out: 0 };
+    let total: Cost = { usd: 0, in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
 
     const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '', input.userId);
     total = sum(total, composed.cost);
@@ -131,9 +139,39 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     return { ok: true, costUsd: total.usd };
   } catch (err) {
     // LO-01: a thrown step would otherwise leave the run stuck at 'running'.
-    await failStep(input.runId, err instanceof Error ? err.message : 'workflow failed');
+    //
+    // Errors LOSE their prototype crossing a durable-step boundary (the runtime
+    // serializes them), so `err instanceof Error` is routinely false even for a
+    // perfectly ordinary Error — which meant every failure in the hive's history
+    // was recorded as the same useless string, "workflow failed", with the real
+    // cause discarded. Dig the message out of whatever shape actually arrives.
+    await failStep(input.runId, describeWorkflowError(err));
     return { ok: false };
   }
+}
+
+/**
+ * Best-effort message extraction from a value thrown across a step boundary.
+ * Handles: a real Error, a serialized {name,message,stack} shape, a plain
+ * string, and anything else (JSON, else String()). Never throws itself.
+ */
+export function describeWorkflowError(err: unknown): string {
+  if (typeof err === 'string' && err.trim()) return err.trim().slice(0, 500);
+  if (err && typeof err === 'object') {
+    const e = err as { name?: unknown; message?: unknown; error?: unknown; cause?: unknown };
+    const msg = typeof e.message === 'string' && e.message.trim() ? e.message.trim() : '';
+    const name = typeof e.name === 'string' && e.name.trim() ? e.name.trim() : '';
+    if (msg) return `${name && name !== 'Error' ? `${name}: ` : ''}${msg}`.slice(0, 500);
+    // Some runtimes nest the original under .error or .cause.
+    if (e.error !== undefined && e.error !== err) return describeWorkflowError(e.error);
+    if (e.cause !== undefined && e.cause !== err) return describeWorkflowError(e.cause);
+    try {
+      const j = JSON.stringify(err);
+      if (j && j !== '{}') return `non-Error thrown: ${j}`.slice(0, 500);
+    } catch { /* circular — fall through */ }
+  }
+  if (err === undefined || err === null) return 'workflow failed (nothing thrown)';
+  return `non-Error thrown: ${String(err)}`.slice(0, 500);
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──

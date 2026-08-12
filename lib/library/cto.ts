@@ -19,12 +19,12 @@ const GATHER_HINTS = ['research', 'gather', 'collect', 'fetch', 'monitor', 'scra
 export function capabilityFloor(agent: PlannedAgent): ModelTier {
   // Key on `role`, not `id`, so every fan-out lane (quant_analyst_2, _3 …) inherits
   // the same floor as the base role.
-  if (SONNET_FLOOR.has(agent.role)) return 'claude-sonnet-4-5';
+  if (SONNET_FLOOR.has(agent.role)) return 'claude-sonnet-5';
   if (HAIKU_FLOOR.has(agent.role)) return 'claude-haiku-4-5';
   const t = (agent.role + ' ' + agent.title).toLowerCase();
   const reasons = REASONING_HINTS.some((h) => t.includes(h));
   const gathers = GATHER_HINTS.some((h) => t.includes(h));
   if (gathers && !reasons) return 'claude-haiku-4-5'; // pure mechanical work
-  if (reasons) return 'claude-sonnet-4-5';
-  return 'claude-sonnet-4-5'; // when unsure, protect quality
+  if (reasons) return 'claude-sonnet-5';
+  return 'claude-sonnet-5'; // when unsure, protect quality
 }

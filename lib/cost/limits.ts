@@ -10,5 +10,5 @@ export const PRODUCER_MAX_TOKENS = 14_000;
 export const PRODUCER_THINKING_BUDGET = 6_000;
 
 export const PROFESSOR_SESSION_CAP_USD = 1.5;
-export const PROFESSOR_MODEL = 'claude-sonnet-4-5';
+export const PROFESSOR_MODEL = 'claude-sonnet-5';
 export const PROFESSOR_MAX_TOKENS = 4096;

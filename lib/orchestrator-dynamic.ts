@@ -1,4 +1,5 @@
 import { getAnthropic, callModel, isAIEnabled, AIDisabledError } from '@/lib/ai/client';
+import { cachedSystem, splitCachedSystem } from '@/lib/ai/prompt-cache';
 import { costUsd } from '@/lib/cost/pricing';
 import { recordCall } from '@/lib/cost/meter';
 import { LIBRARY, Specialist } from './library/specialists';
@@ -19,6 +20,8 @@ import {
   REINFORCE_PROTOCOL,
   type ReinforcementRequest,
 } from './library/reinforcement';
+import { formatGoalsForCoS } from './goals/core';
+import { loadActiveGoals } from './goals/store';
 import { criticSystemPrompt, buildCriticContext } from './library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from './library/synthesizer';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from './trainer/dynamic-trainer';
@@ -45,22 +48,22 @@ const WEB_SEARCH_TOOL = {
   max_uses: 2,
 } as const;
 
-// D3: prompt caching — wrap a system prompt in a cached text block so repeated
-// identical prefixes (doctrine, canon) cost ~10% on cache hits.
-function cachedSystem(prompt: string) {
-  return [{ type: 'text' as const, text: prompt, cache_control: { type: 'ephemeral' as const } }];
-}
-
-function agentSystemPrompt(agent: PlannedAgent): string {
+// D3: prompt caching — see lib/ai/prompt-cache.ts. STABLE content (doctrine,
+// base role prompt, canon) is byte-identical for every agent of a role across
+// every run, so it gets the cache breakpoint; VOLATILE per-run content (task
+// contract, founder grants) is appended after it, uncached.
+function agentSystemPrompt(agent: PlannedAgent): { stable: string; volatile: string } {
   const base =
     agent.source === 'library'
       ? LIBRARY[agent.role]?.systemPrompt ?? CUSTOM[agent.role]?.systemPrompt ?? agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
       : agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`;
   // Q6: load any canon for this specialist (e.g. financial_advisor, risk_analyst)
   const canon = loadCanonFor(agent.role as AgentRole);
+  const stable = `${SELFHIVE_DOCTRINE}\n${base}${canon}${REINFORCE_PROTOCOL}`;
   // Soft grants: append any founder-assigned resource content (additive only).
   const granted = effectFor(BUNDLE, agent.role).systemPromptAddition;
-  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT FOR THIS RUN:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${REINFORCE_PROTOCOL}`;
+  const volatile = `\n\nYOUR TASK CONTRACT FOR THIS RUN:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}`;
+  return { stable, volatile };
 }
 
 // Merge multiple async generators, yielding events as they arrive (true parallelism).
@@ -97,19 +100,24 @@ function buildAgentContext(
 
 async function* streamAgent(
   agentId: string,
-  systemPrompt: string,
+  system: ReturnType<typeof splitCachedSystem>,
   userContent: string,
   useWebSearch: boolean,
   model: string,
   meterCtx: { runId?: string | null; userId?: string | null; role: string; phase: string },
   signal?: AbortSignal
-): AsyncGenerator<DynamicRunEvent & { _final?: string; _in?: number; _out?: number }> {
+): AsyncGenerator<DynamicRunEvent & { _final?: string; _in?: number; _out?: number; _cacheRead?: number; _cacheWrite?: number }> {
   let full = '';
   const stream = getAnthropic().messages.stream(
     {
       model,
       max_tokens: AGENT_MAX_TOKENS,
-      system: cachedSystem(systemPrompt),
+      // Sonnet 5 runs adaptive thinking by default when omitted — disabled to
+      // preserve prior behavior and keep the full AGENT_MAX_TOKENS budget for
+      // the deliverable (see lib/library/cfo.ts). No-op on Haiku, which never
+      // thought by default either.
+      thinking: { type: 'disabled' },
+      system,
       messages: [{ role: 'user', content: userContent }],
       ...(useWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
     },
@@ -118,12 +126,21 @@ async function* streamAgent(
 
   let inTok = 0;
   let outTok = 0;
+  // Cache fields arrive once, on message_start, alongside input_tokens — see
+  // lib/ai/prompt-cache.ts for why capturing them matters now that system
+  // prompts cache.
+  let cacheRead = 0;
+  let cacheWrite = 0;
   for await (const event of stream) {
     if (signal?.aborted) {
       stream.controller.abort();
       return;
     }
-    if (event.type === 'message_start') inTok = event.message.usage?.input_tokens ?? 0;
+    if (event.type === 'message_start') {
+      inTok = event.message.usage?.input_tokens ?? 0;
+      cacheRead = event.message.usage?.cache_read_input_tokens ?? 0;
+      cacheWrite = event.message.usage?.cache_creation_input_tokens ?? 0;
+    }
     if (event.type === 'message_delta') outTok = event.usage?.output_tokens ?? outTok;
     // Surface web search activity
     if (event.type === 'content_block_start' && event.content_block?.type === 'server_tool_use') {
@@ -138,10 +155,10 @@ async function* streamAgent(
     ...meterCtx,
     nodeId: agentId,
     model,
-    usage: { input_tokens: inTok, output_tokens: outTok },
+    usage: { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite },
     ok: true,
   });
-  yield { type: 'agent_done', agentId, artifact: full, _final: full, _in: inTok, _out: outTok };
+  yield { type: 'agent_done', agentId, artifact: full, _final: full, _in: inTok, _out: outTok, _cacheRead: cacheRead, _cacheWrite: cacheWrite };
 }
 
 export async function* runDynamicTeam(
@@ -168,10 +185,14 @@ export async function* runDynamicTeam(
   let totalIn = 0;
   let totalOut = 0;
   let runUsd = 0;
-  const tally = (model: string, inTok: number, outTok: number) => {
+  // Takes the full usage shape (not just in/out) so cache writes (1.25x) and
+  // cache reads (0.1x) are actually priced in — omitting them would make the
+  // CFO's learned per-classification cost systematically too low now that
+  // system prompts cache. See lib/ai/prompt-cache.ts.
+  const tally = (model: string, inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0) => {
     totalIn += inTok;
     totalOut += outTok;
-    runUsd += costUsd(model, inTok, outTok);
+    runUsd += costUsd(model, { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite });
   };
 
   // ── 1. CHIEF OF STAFF composes the team ──
@@ -184,22 +205,31 @@ export async function* runDynamicTeam(
   let planRaw = '';
   try {
     const cosEffect = effectFor(BUNDLE, 'chief_of_staff');
+    // STANDING GOALS — the hive's cross-run agenda, on every compose.
+    const goalsBlock = formatGoalsForCoS(await loadActiveGoals(userId));
+    const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
     const cos = await callModel(
       { runId, userId, role: 'chief_of_staff', phase: 'compose' },
       {
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-5',
         // Headroom for larger plans: a fan-out squad adds an agent + a full
         // taskContract per lane. Billed per token actually produced, so this costs
         // nothing on small singleton plans; it just stops big squads truncating.
         max_tokens: 4000,
-        system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
+        thinking: { type: 'disabled' }, // see streamAgent for why
+        // Split so the stable half caches; the hive's per-run memory (goals,
+        // trainer, reputation, recall) rides uncached in the tail.
+        system: splitCachedSystem(
+          SELFHIVE_DOCTRINE + '\n' + cosPrompt.stable,
+          cosPrompt.volatile + cosEffect.systemPromptAddition,
+        ),
         messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
         ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       }
     );
     const textBlock = cos.content.find((b) => b.type === 'text');
     planRaw = textBlock && 'text' in textBlock ? textBlock.text : '';
-    tally('claude-sonnet-4-5', cos.usage?.input_tokens ?? 0, cos.usage?.output_tokens ?? 0);
+    tally('claude-sonnet-5', cos.usage?.input_tokens ?? 0, cos.usage?.output_tokens ?? 0, cos.usage?.cache_read_input_tokens ?? 0, cos.usage?.cache_creation_input_tokens ?? 0);
   } catch (err) {
     yield { type: 'run_error', error: err instanceof Error ? err.message : 'Chief of Staff failed' };
     return;
@@ -221,7 +251,7 @@ export async function* runDynamicTeam(
     ceilingUsd: DEFAULT_COST_CEILING_USD,
   });
   plan.agents = cfo.agents;
-  const modelFor = (id: string) => cfo.modelByAgent[id] ?? 'claude-sonnet-4-5';
+  const modelFor = (id: string) => cfo.modelByAgent[id] ?? 'claude-sonnet-5';
 
   yield { type: 'team_plan', plan: plan as unknown };
   yield { type: 'cfo_decision', note: cfo.note };
@@ -254,9 +284,10 @@ export async function* runDynamicTeam(
       const depOutputs = agent.dependsOn
         .map((d) => outputs.get(d))
         .filter((o): o is { title: string; content: string } => Boolean(o));
+      const { stable, volatile } = agentSystemPrompt(agent);
       return streamAgent(
         agent.id,
-        agentSystemPrompt(agent),
+        splitCachedSystem(stable, volatile),
         buildAgentContext(problem, agent, depOutputs),
         agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch,
         modelFor(agent.id),
@@ -268,7 +299,7 @@ export async function* runDynamicTeam(
     for await (const ev of mergeGenerators(gens)) {
       if (ev._final !== undefined && ev.agentId) {
         outputs.set(ev.agentId, { title: titleById.get(ev.agentId) ?? ev.agentId, content: ev._final });
-        tally(modelFor(ev.agentId), ev._in ?? 0, ev._out ?? 0);
+        tally(modelFor(ev.agentId), ev._in ?? 0, ev._out ?? 0, ev._cacheRead ?? 0, ev._cacheWrite ?? 0);
       }
       const { _final, _in, _out, ...clean } = ev;
       void _final; void _in; void _out;
@@ -303,15 +334,16 @@ export async function* runDynamicTeam(
         const re = await callModel(
           { runId, userId, role: 'chief_of_staff', phase: 'backfire' },
           {
-            model: 'claude-sonnet-4-5',
+            model: 'claude-sonnet-5',
             max_tokens: 2000,
+            thinking: { type: 'disabled' }, // see streamAgent for why
             system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, reinforceRequests, budget.approved)),
             messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
           }
         );
         const tb = re.content.find((b) => b.type === 'text');
         reRaw = tb && 'text' in tb ? tb.text : '';
-        tally('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0);
+        tally('claude-sonnet-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0, re.usage?.cache_read_input_tokens ?? 0, re.usage?.cache_creation_input_tokens ?? 0);
       } catch { reRaw = ''; }
 
       const reAgents = applySpawner(parseReinforcementAgents(reRaw, plan.agents, budget.approved, customAgents));
@@ -327,8 +359,9 @@ export async function* runDynamicTeam(
           const depOutputs = agent.dependsOn
             .map((d) => outputs.get(d))
             .filter((o): o is { title: string; content: string } => Boolean(o));
+          const { stable, volatile } = agentSystemPrompt(agent);
           return streamAgent(
-            agent.id, agentSystemPrompt(agent), buildAgentContext(problem, agent, depOutputs),
+            agent.id, splitCachedSystem(stable, volatile), buildAgentContext(problem, agent, depOutputs),
             agent.needsLiveData || effectFor(BUNDLE, agent.role).enableWebSearch, capabilityFloor(agent),
             { runId, userId, role: agent.role, phase: 'backfire' }, signal
           );
@@ -339,7 +372,7 @@ export async function* runDynamicTeam(
             const reAgent = reAgents.find((a) => a.id === ev.agentId)!;
             const { cleaned } = extractReinforcement(reAgent, ev._final); // do NOT recurse
             outputs.set(ev.agentId, { title: reTitleById.get(ev.agentId) ?? ev.agentId, content: cleaned });
-            tally(capabilityFloor(reAgent), ev._in ?? 0, ev._out ?? 0);
+            tally(capabilityFloor(reAgent), ev._in ?? 0, ev._out ?? 0, ev._cacheRead ?? 0, ev._cacheWrite ?? 0);
           }
           const { _final, _in, _out, ...clean } = ev;
           void _final; void _in; void _out;
@@ -365,26 +398,31 @@ export async function* runDynamicTeam(
     const criticEffect = effectFor(BUNDLE, 'critic');
     const cstream = getAnthropic().messages.stream(
       {
-        model: 'claude-sonnet-4-5',
+        model: 'claude-sonnet-5',
         max_tokens: CRITIC_MAX_TOKENS,
-        system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + criticEffect.systemPromptAddition),
+        thinking: { type: 'disabled' }, // see streamAgent for why
+        system: splitCachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt(), criticEffect.systemPromptAddition),
         messages: [{ role: 'user', content: buildCriticContext(problem, teamOutputs) }],
         ...(criticEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       },
       { signal }
     );
-    let cIn = 0, cOut = 0;
+    let cIn = 0, cOut = 0, cCacheRead = 0, cCacheWrite = 0;
     for await (const event of cstream) {
       if (signal?.aborted) { cstream.controller.abort(); return; }
-      if (event.type === 'message_start') cIn = event.message.usage?.input_tokens ?? 0;
+      if (event.type === 'message_start') {
+        cIn = event.message.usage?.input_tokens ?? 0;
+        cCacheRead = event.message.usage?.cache_read_input_tokens ?? 0;
+        cCacheWrite = event.message.usage?.cache_creation_input_tokens ?? 0;
+      }
       if (event.type === 'message_delta') cOut = event.usage?.output_tokens ?? cOut;
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         critique += event.delta.text;
         yield { type: 'agent_delta', agentId: 'critic', delta: event.delta.text };
       }
     }
-    tally('claude-sonnet-4-5', cIn, cOut);
-    await recordCall({ runId, userId, role: 'critic', phase: 'critic', nodeId: 'critic', model: 'claude-sonnet-4-5', usage: { input_tokens: cIn, output_tokens: cOut }, ok: true });
+    tally('claude-sonnet-5', cIn, cOut, cCacheRead, cCacheWrite);
+    await recordCall({ runId, userId, role: 'critic', phase: 'critic', nodeId: 'critic', model: 'claude-sonnet-5', usage: { input_tokens: cIn, output_tokens: cOut, cache_read_input_tokens: cCacheRead, cache_creation_input_tokens: cCacheWrite }, ok: true });
   } catch {
     critique = '(critic unavailable)';
   }
@@ -404,27 +442,32 @@ export async function* runDynamicTeam(
       {
         model: SYNTHESIZER_MODEL,
         max_tokens: SYNTH_MAX_TOKENS,
-        system: cachedSystem(synthesizerSystemPrompt(plan.isRegulatedFinance) + loadFounderManifest() + synthEffect.systemPromptAddition),
+        thinking: { type: 'disabled' }, // see streamAgent for why
+        system: splitCachedSystem(synthesizerSystemPrompt(plan.isRegulatedFinance) + loadFounderManifest(), synthEffect.systemPromptAddition),
         messages: [{ role: 'user', content: synthContext }],
         ...(synthEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       },
       { signal }
     );
-    let sIn = 0, sOut = 0;
+    let sIn = 0, sOut = 0, sCacheRead = 0, sCacheWrite = 0;
     for await (const event of stream) {
       if (signal?.aborted) {
         stream.controller.abort();
         return;
       }
-      if (event.type === 'message_start') sIn = event.message.usage?.input_tokens ?? 0;
+      if (event.type === 'message_start') {
+        sIn = event.message.usage?.input_tokens ?? 0;
+        sCacheRead = event.message.usage?.cache_read_input_tokens ?? 0;
+        sCacheWrite = event.message.usage?.cache_creation_input_tokens ?? 0;
+      }
       if (event.type === 'message_delta') sOut = event.usage?.output_tokens ?? sOut;
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         answer += event.delta.text;
         yield { type: 'agent_delta', agentId: 'synthesizer', delta: event.delta.text };
       }
     }
-    tally(SYNTHESIZER_MODEL, sIn, sOut);
-    await recordCall({ runId, userId, role: 'synthesizer', phase: 'synthesize', nodeId: 'synthesizer', model: SYNTHESIZER_MODEL, usage: { input_tokens: sIn, output_tokens: sOut }, ok: true });
+    tally(SYNTHESIZER_MODEL, sIn, sOut, sCacheRead, sCacheWrite);
+    await recordCall({ runId, userId, role: 'synthesizer', phase: 'synthesize', nodeId: 'synthesizer', model: SYNTHESIZER_MODEL, usage: { input_tokens: sIn, output_tokens: sOut, cache_read_input_tokens: sCacheRead, cache_creation_input_tokens: sCacheWrite }, ok: true });
   } catch (err) {
     yield { type: 'run_error', error: err instanceof Error ? err.message : 'Synthesizer failed' };
     return;
@@ -463,24 +506,29 @@ export async function* runDynamicTeam(
       {
         model: TRAINER_MODEL,
         max_tokens: TRAINER_MAX_TOKENS,
-        system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt() + trainerEffect.systemPromptAddition),
+        thinking: { type: 'disabled' }, // see streamAgent for why
+        system: splitCachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt(), trainerEffect.systemPromptAddition),
         messages: [{ role: 'user', content: trainerCtx }],
         ...(trainerEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
       },
       { signal }
     );
-    let tIn = 0, tOut = 0;
+    let tIn = 0, tOut = 0, tCacheRead = 0, tCacheWrite = 0;
     for await (const event of tstream) {
       if (signal?.aborted) { tstream.controller.abort(); return; }
-      if (event.type === 'message_start') tIn = event.message.usage?.input_tokens ?? 0;
+      if (event.type === 'message_start') {
+        tIn = event.message.usage?.input_tokens ?? 0;
+        tCacheRead = event.message.usage?.cache_read_input_tokens ?? 0;
+        tCacheWrite = event.message.usage?.cache_creation_input_tokens ?? 0;
+      }
       if (event.type === 'message_delta') tOut = event.usage?.output_tokens ?? tOut;
       if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
         trainerReport += event.delta.text;
         yield { type: 'agent_delta', agentId: 'trainer', delta: event.delta.text };
       }
     }
-    tally(TRAINER_MODEL, tIn, tOut);
-    await recordCall({ runId, userId, role: 'trainer', phase: 'trainer', nodeId: 'trainer', model: TRAINER_MODEL, usage: { input_tokens: tIn, output_tokens: tOut }, ok: true });
+    tally(TRAINER_MODEL, tIn, tOut, tCacheRead, tCacheWrite);
+    await recordCall({ runId, userId, role: 'trainer', phase: 'trainer', nodeId: 'trainer', model: TRAINER_MODEL, usage: { input_tokens: tIn, output_tokens: tOut, cache_read_input_tokens: tCacheRead, cache_creation_input_tokens: tCacheWrite }, ok: true });
   } catch {
     trainerReport = '(trainer unavailable)';
   }

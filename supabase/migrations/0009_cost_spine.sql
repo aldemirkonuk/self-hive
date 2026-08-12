@@ -14,6 +14,14 @@ create table if not exists run_costs (
   agent_count int not null default 0,
   created_at timestamptz not null default now()
 );
+-- run_costs PREDATES this migration (it was written straight to the live DB with
+-- no migration file — see the header). `create table if not exists` therefore
+-- silently skips an existing table, so the cache columns above never landed on
+-- deployed databases and every SELECT naming them failed. Add them explicitly,
+-- the same way 0004 backfills custom_agents. No-ops on a fresh database.
+alter table run_costs add column if not exists cache_read_tokens int not null default 0;
+alter table run_costs add column if not exists cache_write_tokens int not null default 0;
+
 create unique index if not exists run_costs_run_id_uidx on run_costs(run_id);
 create index if not exists run_costs_user_created_idx on run_costs(user_id, created_at desc);
 create index if not exists run_costs_user_class_idx on run_costs(user_id, classification);

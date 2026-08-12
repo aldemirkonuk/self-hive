@@ -101,6 +101,14 @@ left join run_costs rc on rc.run_id = ac.run_id
 where ac.ok = true
 group by ac.user_id, ac.run_id, r.created_at, r.status, rc.classification, rc.agent_count;
 
+-- The three views above read agent_calls, which is RLS-protected with an
+-- owner-select policy. A Postgres view runs with the DEFINER's rights by
+-- default, which would BYPASS that policy for anyone querying through the API.
+-- security_invoker makes each view enforce the RLS of the CALLING user, so the
+-- views inherit agent_calls' owner scoping instead of defeating it.
+alter view public.v_agent_lifetime_spend set (security_invoker = on);
+alter view public.v_run_spend set (security_invoker = on);
+
 -- Daily burn (BURN tab).
 create or replace view v_daily_burn as
 select
@@ -111,3 +119,4 @@ select
 from agent_calls
 where ok = true
 group by user_id, (created_at at time zone 'utc')::date;
+alter view public.v_daily_burn set (security_invoker = on);

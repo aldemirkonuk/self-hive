@@ -10,6 +10,7 @@
 
 import { callModel, isAIEnabled } from '@/lib/ai/client';
 import { costUsd } from '@/lib/cost/pricing';
+import { cachedSystem } from '@/lib/ai/prompt-cache';
 import { PROFESSOR_SESSION_CAP_USD, PROFESSOR_MODEL, PROFESSOR_MAX_TOKENS } from '@/lib/cost/limits';
 import { scoutGaps, type CurriculumGap } from './scout';
 
@@ -91,7 +92,11 @@ export async function runProfessorSession(
         {
           model: PROFESSOR_MODEL,
           max_tokens: PROFESSOR_MAX_TOKENS,
-          system: professorSystemPrompt(),
+          thinking: { type: 'disabled' }, // preserve prior (thinking-off) behavior on Sonnet 5
+          // Fully static prompt, and this loop calls it once per gap in the
+          // same session — 1h TTL so back-to-back gaps (and future sessions
+          // within the hour) hit cache instead of re-paying for it.
+          system: cachedSystem(professorSystemPrompt(), '1h'),
           messages: [{ role: 'user', content: buildGapPrompt(gap) }],
           tools: [WEB_SEARCH_TOOL],
         },

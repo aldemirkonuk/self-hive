@@ -22,6 +22,11 @@ export function shouldRequireApproval(kind: ChangeRequestKind, originAgent: stri
   if (kind === 'agent_promotion') return true;
   if (originAgent === 'professor') return true;
   if (kind === 'overlay' && (originAgent === 'distiller' || originAgent === 'immunizer')) return false;
+  // HIVE GOALS (migration 0013) are auto-applied like overlays: bounded by
+  // MAX_ACTIVE_GOALS, derived from the same scouted signals, and fully
+  // reversible from /approvals. A FOUNDER-authored goal never reaches this
+  // path — agents cannot mutate one at all (lib/goals/core.ts canAgentMutate).
+  if (kind === 'goal' && (originAgent === 'chief_of_staff' || originAgent === 'ceo')) return false;
   return true;
 }
 

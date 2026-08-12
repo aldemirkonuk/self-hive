@@ -11,7 +11,7 @@ export const MAX_DEPENDENCY_DEPTH = 4;
 // The CoS may request fewer; the CFO may cap lower still for budget (see cfo.ts).
 export const MAX_FANOUT_PER_ROLE = 3;
 
-export type ModelTier = 'claude-haiku-4-5' | 'claude-sonnet-4-5';
+export type ModelTier = 'claude-haiku-4-5' | 'claude-sonnet-5';
 
 export interface PlannedAgent {
   id: string; // UNIQUE per-instance key (library id, spawned id, or a fan-out variant like "quant_analyst_2")
@@ -41,12 +41,39 @@ export interface CustomAgentDesc {
   mandate: string;
 }
 
+/**
+ * The CoS prompt, split by VOLATILITY so it can actually be prompt-cached.
+ *
+ * Caching is a strict byte-PREFIX match: one changed byte invalidates every
+ * cached byte after it. The memory blocks below change at very different rates
+ * — `recallBlock` is ranked per-PROBLEM, so it changes on literally every run.
+ * When those blocks were interpolated in the MIDDLE of this template (right
+ * after the library list, ahead of ~35 lines of stable RULES + OUTPUT spec),
+ * the entire prompt was uncacheable: the hive paid the 1.25x cache-WRITE
+ * premium on every run and never once got a read.
+ *
+ * So all volatile content now lands at the TAIL, ordered least- to
+ * most-volatile, and `stable` gets the cache breakpoint:
+ *
+ *   stable   → doctrine · role intro · LIBRARY · RULES · OUTPUT spec
+ *   volatile → goals (daily) · trainer + reputation (per-run) · recall (per-problem)
+ *
+ * Callers must pass BOTH halves to splitCachedSystem() (see lib/ai/prompt-cache.ts).
+ */
+export interface CoSPrompt {
+  /** Byte-identical across runs until the library or founder agents change. */
+  stable: string;
+  /** The hive's memory for THIS run. Never cached. */
+  volatile: string;
+}
+
 export function chiefOfStaffSystemPrompt(
   customAgents: CustomAgentDesc[] = [],
   trainerHistory = '',
   reputationBlock = '', // HIVE ECONOMY: earned per-role standing (see lib/library/reputation.ts)
   recallBlock = '', // HIVE MIND: past episodes most like this problem, illuminated (see lib/library/recall.ts)
-): string {
+  goalsBlock = '', // STANDING GOALS: the hive's cross-run agenda (see lib/goals/core.ts)
+): CoSPrompt {
   const libDesc = LIBRARY_IDS.map((id) => {
     const s = LIBRARY[id];
     return `  - ${id} (${s.title}, ${s.domain}): ${s.successCriteria.slice(0, 80)}`;
@@ -65,14 +92,21 @@ export function chiefOfStaffSystemPrompt(
     ? `\n\nCOMPANY MEMORY — past run scores from your own TRAINER (use this to compose better TODAY than yesterday):${trainerHistory}\nWhen composing, prefer agents trending UP. If an agent has trended below 6.5 for the last 2+ similar runs, either skip them in favor of a different library specialist or SPAWN a fresh replacement with a sharper task contract. Do NOT explain this reasoning in your output JSON — just compose better.`
     : '';
 
-  return `You are the CHIEF OF STAFF of SELFHIVE — a self-improving autonomous company owned by the founder (Aldemir).
+  // The hive's memory for THIS run, ordered least- to most-volatile so the
+  // cache breakpoint above it stays valid for as long as possible.
+  const volatile =
+    goalsBlock || trainerBlock || reputationBlock || recallBlock
+      ? `\n\n=== THE HIVE'S MEMORY (read this before you compose) ===${goalsBlock}${trainerBlock}${reputationBlock}${recallBlock}\n=== END MEMORY ===\n\nNow compose the team, honoring both the RULES above and the memory here.`
+      : '';
+
+  const stable = `You are the CHIEF OF STAFF of SELFHIVE — a self-improving autonomous company owned by the founder (Aldemir).
 
 Your job: read an incoming problem and compose the RIGHT team to solve it and deliver a real ANSWER. You select agents from the library, and you SPAWN new specialists when the library doesn't cover what's needed.
 
 You are the founder's company. The founder is the only user. For regulated domains (investing, etc.) you DO deliver real, substantive conclusions — the founder wants real analysis, not hedging — but you flag isRegulatedFinance so a disclaimer is attached.
 
 THE LIBRARY (select these by id):
-${libraryDesc}${trainerBlock}${reputationBlock}${recallBlock}
+${libraryDesc}
 
 RULES:
 - Team size: deploy EVERY specialist the problem genuinely needs — up to ${MAX_TEAM_SIZE}. Domain mastery requires depth. Do NOT artificially shrink the team to save cost; the CFO handles cost by assigning cheaper models, never by cutting specialists. The only thing to avoid is REDUNDANT agents that do the same job. If a markets problem needs a Quant, a Risk Analyst, a Macro Analyst, a Sector Specialist, and a Sentiment Analyst — deploy all five.
@@ -124,6 +158,8 @@ Example for "what stocks should I buy based on today's trends" — note the QUAN
     { "id": "financial_advisor", "role": "financial_advisor", "title": "Financial Advisor", "source": "library", "taskContract": "...", "successCriteria": "...", "dependsOn": ["quant_analyst","quant_analyst_2","quant_analyst_3","risk_analyst"], "needsLiveData": false }
   ]
 }`;
+
+  return { stable, volatile };
 }
 
 /**

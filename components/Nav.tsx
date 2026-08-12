@@ -15,6 +15,7 @@ const TABS = [
   { href: '/hive', label: 'HIVE' },
   { href: '/resources', label: 'RESOURCES' },
   { href: '/history', label: 'HISTORY' },
+  { href: '/reports', label: 'REPORTS' },
   { href: '/ledger', label: 'LEDGER' },
   { href: '/approvals', label: 'APPROVALS' },
   { href: '/dashboard', label: 'DASHBOARD' },

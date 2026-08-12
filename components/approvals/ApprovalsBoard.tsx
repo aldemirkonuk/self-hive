@@ -11,6 +11,7 @@ const KIND_LABEL: Record<ChangeRequestKind, string> = {
   agent_promotion: 'AGENT PROMOTION',
   canon_doc: 'CANON DOC',
   code_patch: 'CODE PATCH',
+  goal: 'HIVE GOAL',
 };
 
 const KIND_COLOR: Record<ChangeRequestKind, string> = {
@@ -20,10 +21,11 @@ const KIND_COLOR: Record<ChangeRequestKind, string> = {
   agent_promotion: '#a855f7',
   canon_doc: '#10b981',
   code_patch: '#ef4444',
+  goal: '#22c55e',
 };
 
 const KIND_ORDER: ChangeRequestKind[] = [
-  'agent_promotion', 'curriculum_lesson', 'curriculum_source', 'overlay', 'canon_doc', 'code_patch',
+  'agent_promotion', 'curriculum_lesson', 'curriculum_source', 'goal', 'overlay', 'canon_doc', 'code_patch',
 ];
 
 export default function ApprovalsBoard({

@@ -5,10 +5,10 @@ import { costUsd, tokensFromUsage } from './pricing';
 describe('costUsd', () => {
   it('prices sonnet input/output', () => {
     // 1M in + 1M out = $3 + $15 = $18
-    assert.equal(costUsd('claude-sonnet-4-5', 1_000_000, 1_000_000), 18);
+    assert.equal(costUsd('claude-sonnet-5', 1_000_000, 1_000_000), 18);
   });
   it('prices cache read cheaper than input', () => {
-    const withCache = costUsd('claude-sonnet-4-5', {
+    const withCache = costUsd('claude-sonnet-5', {
       input_tokens: 0,
       output_tokens: 0,
       cache_read_input_tokens: 1_000_000,

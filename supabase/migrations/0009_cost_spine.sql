@@ -14,6 +14,14 @@ create table if not exists run_costs (
   agent_count int not null default 0,
   created_at timestamptz not null default now()
 );
+-- run_costs PREDATES this migration (it was written straight to the live DB with
+-- no migration file — see the header). `create table if not exists` therefore
+-- silently skips an existing table, so the cache columns above never landed on
+-- deployed databases and every SELECT naming them failed. Add them explicitly,
+-- the same way 0004 backfills custom_agents. No-ops on a fresh database.
+alter table run_costs add column if not exists cache_read_tokens int not null default 0;
+alter table run_costs add column if not exists cache_write_tokens int not null default 0;
+
 create unique index if not exists run_costs_run_id_uidx on run_costs(run_id);
 create index if not exists run_costs_user_created_idx on run_costs(user_id, created_at desc);
 create index if not exists run_costs_user_class_idx on run_costs(user_id, classification);
@@ -93,6 +101,14 @@ left join run_costs rc on rc.run_id = ac.run_id
 where ac.ok = true
 group by ac.user_id, ac.run_id, r.created_at, r.status, rc.classification, rc.agent_count;
 
+-- The three views above read agent_calls, which is RLS-protected with an
+-- owner-select policy. A Postgres view runs with the DEFINER's rights by
+-- default, which would BYPASS that policy for anyone querying through the API.
+-- security_invoker makes each view enforce the RLS of the CALLING user, so the
+-- views inherit agent_calls' owner scoping instead of defeating it.
+alter view public.v_agent_lifetime_spend set (security_invoker = on);
+alter view public.v_run_spend set (security_invoker = on);
+
 -- Daily burn (BURN tab).
 create or replace view v_daily_burn as
 select
@@ -103,3 +119,4 @@ select
 from agent_calls
 where ok = true
 group by user_id, (created_at at time zone 'utc')::date;
+alter view public.v_daily_burn set (security_invoker = on);

@@ -5,6 +5,7 @@
 // returns serializable results instead of streaming through a generator.
 
 import { getAnthropic, callModel, isAIEnabled } from '../ai/client';
+import { cachedSystem, splitCachedSystem } from '../ai/prompt-cache';
 import { costUsd } from '../cost/pricing';
 import { recordCall } from '../cost/meter';
 import type { StepCost } from '../cost/types';
@@ -35,6 +36,8 @@ import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from '../train
 import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable, type DistilledOverlay } from '../library/distiller';
 import { immunizerSystemPrompt, formatAntibodiesForPrompt, ANTIBODY_AGENT_ID } from '../library/immunizer';
 import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, listActiveAdviceForRoles, type OverlayRow } from '../db/overlays';
+import { formatGoalsForCoS } from '../goals/core';
+import { loadActiveGoals } from '../goals/store';
 import { getUserSettingsAdmin } from '../db/settings';
 import { auditAutoApproved } from '../approvals/policy';
 import { loadFounderManifest, loadCanonFor } from '../canon-loader';
@@ -61,10 +64,6 @@ import type { LeafOutput } from '../elastic/types';
 const DISCLAIMER = 'SELFHIVE does not provide investment advice or stock recommendations.';
 const WEB_SEARCH_TOOL = { type: 'web_search_20250305', name: 'web_search', max_uses: 2 } as const;
 
-function cachedSystem(prompt: string) {
-  return [{ type: 'text' as const, text: prompt, cache_control: { type: 'ephemeral' as const } }];
-}
-
 // ── CFO cost accounting (ME-07): every step reports tokens + $ so the workflow
 // can record run_costs and the CFO learns the per-task cost. Re-exported from
 // the shared cost spine so this file and the callers share one definition. ──
@@ -81,24 +80,35 @@ async function makeEmitter(runId: string) {
   };
 }
 
+// Split into a STABLE prefix (byte-identical for every agent of this role, in
+// every run, forever — doctrine + base prompt + canon + the static protocol
+// text) and a VOLATILE suffix (per-run: this run's task contract, founder
+// grants, and overlays that mutate as the hive learns). Only the stable part
+// gets the cache breakpoint (see lib/ai/prompt-cache.ts) — mixing volatile
+// bytes ahead of it would invalidate the entry on every single call, which is
+// what the single-string version of this function did before.
 function agentSystemPrompt(
   agent: PlannedAgent,
   custom: Record<string, Specialist>,
   bundle?: ResourceBundle,
   overlays: OverlayRow[] = [],
-): string {
+): { stable: string; volatile: string } {
   // Identity (prompt, canon, grants, overlays) keys on `role` so every squad lane
   // shares the same brain and learnings; per-instance state keys on `id`.
   const base = agent.source === 'library'
     ? LIBRARY[agent.role]?.systemPrompt ?? custom[agent.role]?.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`
     : agent.systemPrompt ?? `You are a ${agent.title} inside SELFHIVE.`;
   const canon = loadCanonFor(agent.role as AgentRole);
+  const figures = familyFor(agent.role) === 'financial' ? FIGURES_PROMPT_SUFFIX : '';
+  const stable = `${SELFHIVE_DOCTRINE}\n${base}${canon}${REINFORCE_PROTOCOL}${figures}`;
+
   const granted = effectFor(bundle, agent.role).systemPromptAddition;
   // Auto-mutated overlays from prior trainer runs — silently applied unless the
   // founder has flipped the global kill switch (loaded as [] in that case).
   const learnings = formatOverlaysForPrompt(overlays);
-  const figures = familyFor(agent.role) === 'financial' ? FIGURES_PROMPT_SUFFIX : '';
-  return `${SELFHIVE_DOCTRINE}\n${base}${canon}\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}${REINFORCE_PROTOCOL}${figures}`;
+  const volatile = `\n\nYOUR TASK CONTRACT:\n${agent.taskContract}\n\nSUCCESS LOOKS LIKE: ${agent.successCriteria}${granted}${learnings}`;
+
+  return { stable, volatile };
 }
 
 function buildAgentContext(problem: string, depOutputs: { title: string; content: string }[]): string {
@@ -139,14 +149,23 @@ export async function composeImpl(
 
   const customDescs = Object.values(customAgents).map((c) => ({ id: c.id, title: c.title, domain: c.domain, mandate: c.successCriteria }));
   const cosEffect = effectFor(bundle, 'chief_of_staff');
+  // STANDING GOALS — the hive's cross-run agenda, injected on EVERY compose so
+  // goals steer team composition (and flow downstream through task contracts).
+  const goalsBlock = formatGoalsForCoS(await loadActiveGoals(userId));
+  const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
   const cos = await callModel(
     { userId, runId, role: 'chief_of_staff', phase: 'compose' },
     {
       // Headroom (4000) for larger fan-out plans — a squad adds an agent + a full
       // taskContract per lane; billed per token produced, so free on small plans.
-      model: 'claude-sonnet-4-5', max_tokens: 4000,
-      // CoS now sees prior-run trainer scores — closes the improvement loop.
-      system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock) + cosEffect.systemPromptAddition),
+      model: 'claude-sonnet-5', max_tokens: 4000,
+      thinking: { type: 'disabled' }, // see executeAgents for why
+      // Split so the stable half (doctrine + library + rules + output spec)
+      // actually caches; the hive's per-run memory rides uncached in the tail.
+      system: splitCachedSystem(
+        SELFHIVE_DOCTRINE + '\n' + cosPrompt.stable,
+        cosPrompt.volatile + cosEffect.systemPromptAddition,
+      ),
       messages: [{ role: 'user', content: `Compose the team for this problem:\n\n${problem}` }],
       ...(cosEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
     },
@@ -195,7 +214,9 @@ export async function composeImpl(
   const cost: StepCost = {
     in: cos.usage?.input_tokens ?? 0,
     out: cos.usage?.output_tokens ?? 0,
-    usd: costUsd('claude-sonnet-4-5', cos.usage?.input_tokens ?? 0, cos.usage?.output_tokens ?? 0),
+    cacheRead: cos.usage?.cache_read_input_tokens ?? 0,
+    cacheWrite: cos.usage?.cache_creation_input_tokens ?? 0,
+    usd: costUsd('claude-sonnet-5', cos.usage ?? {}),
   };
   // costMode mirrors the CFO's budget signal — fed to the reinforcement step so the
   // backfire loop is held under cost discipline.
@@ -207,7 +228,7 @@ export async function composeImpl(
 // Shared per-agent execution — drives a set of agents in parallel, emitting the
 // same events for each. Used by the normal layer step AND the reinforcement step
 // so streaming/cost/failure-isolation behaviour lives in exactly one place.
-type AgentResult = { id: string; title: string; content: string; in: number; out: number; usd: number };
+type AgentResult = { id: string; title: string; content: string; in: number; out: number; cacheRead: number; cacheWrite: number; usd: number };
 async function executeAgents(
   emit: (type: string, payload?: Record<string, unknown>) => Promise<void>,
   problem: string,
@@ -234,20 +255,35 @@ async function executeAgents(
     await emit('agent_start', { agentId: agent.id, agentTitle: agent.title, agentColor: color, role: agent.role, lane: agent.lane, source: agent.source, model });
 
     const deps = agent.dependsOn.map((d) => priorOutputs[d]).filter(Boolean) as { title: string; content: string }[];
-    let inTok = 0; let outTok = 0;
+    // Cache fields arrive once, on message_start, alongside input_tokens — they
+    // don't stream incrementally like output_tokens does. Capturing them here
+    // (instead of dropping them, as the pre-caching code did) keeps cost
+    // tracking honest: cache writes cost 1.25x on top of input price, so
+    // omitting them would silently understate spend now that prompts cache.
+    let inTok = 0; let outTok = 0; let cacheRead = 0; let cacheWrite = 0;
 
     if (!elastic) {
       // ── Original single-pass path (UNCHANGED — the off-path) ──
       let content = ''; let lastFlush = 0; let ok = true;
       try {
+        const { stable, volatile } = agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? []);
         const stream = getAnthropic().messages.stream({
           model, max_tokens: AGENT_MAX_TOKENS,
-          system: cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? [])),
+          // Sonnet 5 runs adaptive thinking by default when omitted (Sonnet 4.5
+          // never thought unless asked) — disabled to preserve prior behavior
+          // and keep the full AGENT_MAX_TOKENS budget for the deliverable.
+          // No-op when `model` resolves to Haiku, which never thought either.
+          thinking: { type: 'disabled' },
+          system: splitCachedSystem(stable, volatile),
           messages: [{ role: 'user', content: buildAgentContext(problem, deps) }],
           ...(agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
         });
         for await (const ev of stream) {
-          if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
+          if (ev.type === 'message_start') {
+            inTok = ev.message.usage?.input_tokens ?? 0;
+            cacheRead = ev.message.usage?.cache_read_input_tokens ?? 0;
+            cacheWrite = ev.message.usage?.cache_creation_input_tokens ?? 0;
+          }
           if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
           if (ev.type === 'content_block_start' && ev.content_block?.type === 'server_tool_use') await emit('searching', { agentId: agent.id });
           if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
@@ -260,20 +296,22 @@ async function executeAgents(
         ok = false;
         content = content || `(agent unavailable: ${e instanceof Error ? e.message : 'error'})`;
       }
+      const usage = { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite };
       await recordCall({
         userId: meterCtx.userId, runId: meterCtx.runId, nodeId: agent.id, role: agent.role, phase: meterCtx.phase,
-        model, usage: { input_tokens: inTok, output_tokens: outTok }, ok,
+        model, usage, ok,
       });
       await emit('agent_content', { agentId: agent.id, content });
       await emit('agent_done', { agentId: agent.id, artifact: content });
-      return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
+      return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, cacheRead, cacheWrite, usd: costUsd(model, usage) };
     }
 
     // ── ELASTIC: continuation relay — same tile, streaming preserved. The agent
     // continues if it hit its output ceiling or self-reported incomplete; the
     // JSON tail is hidden from every emit; a 20-min ceiling abandons a runaway. ──
     const baseCtx = buildAgentContext(problem, deps);
-    const system = cachedSystem(agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? []));
+    const { stable: leafStable, volatile: leafVolatile } = agentSystemPrompt(agent, customAgents, bundle, overlaysByRole[agent.role] ?? []);
+    const system = splitCachedSystem(leafStable, leafVolatile);
     const hasTools = agent.needsLiveData || effectFor(bundle, agent.role).enableWebSearch;
     const startedAt = Date.now();
     // Within ONE agent step the relay is governed by the ~300s function cap, not
@@ -298,15 +336,22 @@ async function executeAgents(
       if (remaining <= 0) break; // past the per-step relay budget
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), remaining);
-      let roundText = ''; let roundIn = 0; let roundOut = 0;
+      let roundText = ''; let roundIn = 0; let roundOut = 0; let roundCacheRead = 0; let roundCacheWrite = 0;
       try {
         const stream = getAnthropic().messages.stream({
-          model, max_tokens: AGENT_MAX_TOKENS, system,
+          model, max_tokens: AGENT_MAX_TOKENS, thinking: { type: 'disabled' }, system,
           messages: [{ role: 'user', content: userContent }],
           ...(hasTools ? { tools: [WEB_SEARCH_TOOL] } : {}),
         }, { signal: ac.signal });
         for await (const ev of stream) {
-          if (ev.type === 'message_start') roundIn = ev.message.usage?.input_tokens ?? 0;
+          if (ev.type === 'message_start') {
+            roundIn = ev.message.usage?.input_tokens ?? 0;
+            // Rounds after the first reuse the identical `system` value, so
+            // subsequent rounds should read this from cache — cache_read here
+            // is the relay actually paying off within a single agent's run.
+            roundCacheRead = ev.message.usage?.cache_read_input_tokens ?? 0;
+            roundCacheWrite = ev.message.usage?.cache_creation_input_tokens ?? 0;
+          }
           if (ev.type === 'message_delta') {
             roundOut = ev.usage?.output_tokens ?? roundOut;
             if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
@@ -324,7 +369,7 @@ async function executeAgents(
       } finally {
         clearTimeout(timer);
       }
-      inTok += roundIn; outTok += roundOut;
+      inTok += roundIn; outTok += roundOut; cacheRead += roundCacheRead; cacheWrite += roundCacheWrite;
       content += roundText;
 
       const ex = extractLeaf(content);
@@ -336,13 +381,14 @@ async function executeAgents(
       round++;
     }
 
+    const relayUsage = { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite };
     await recordCall({
       userId: meterCtx.userId, runId: meterCtx.runId, nodeId: agent.id, role: agent.role, phase: meterCtx.phase,
-      model, usage: { input_tokens: inTok, output_tokens: outTok }, ok,
+      model, usage: relayUsage, ok,
     });
     await emit('agent_content', { agentId: agent.id, content: stripLeafTail(content) });
     await emit('agent_done', { agentId: agent.id, artifact: stripLeafTail(content) });
-    return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, usd: costUsd(model, inTok, outTok) };
+    return { id: agent.id, title: agent.title, content, in: inTok, out: outTok, cacheRead, cacheWrite, usd: costUsd(model, relayUsage) };
   }));
 }
 
@@ -364,7 +410,7 @@ export async function runLayerImpl(
   const overlaysByAgent = await loadActiveOverlaysForAgents(userId, [...new Set(layer.map((a) => a.role))], classification, problem);
   const elastic = isElastic();
   const results = await executeAgents(
-    emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5', customAgents, bundle, overlaysByAgent, elastic,
+    emit, problem, layer, priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-5', customAgents, bundle, overlaysByAgent, elastic,
     undefined, { userId, runId, phase: 'layer' },
   );
 
@@ -386,7 +432,7 @@ export async function runLayerImpl(
       } catch { /* node bookkeeping never breaks a run */ }
     }
     out[r.id] = { title: r.title, content };
-    cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
+    cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite });
   }
   return { outputs: out, cost };
 }
@@ -413,33 +459,39 @@ export async function runLeadImpl(
 
   // 1. Sub-lanes run suppressed (no UI events), in parallel, structured.
   const lanes = subLanes.slice(0, SUBTEAM_MAX);
-  const subResults = await Promise.all(lanes.map(async (s): Promise<SubResult & { in: number; out: number }> => {
+  const subResults = await Promise.all(lanes.map(async (s): Promise<SubResult & { in: number; out: number; cacheRead: number; cacheWrite: number }> => {
     const label = s.lane ?? s.title;
     try {
       const resp = await callModel(
         { userId, runId, nodeId: s.id, role: s.role, phase: 'layer' },
         {
           model: MODEL_LEAF, max_tokens: AGENT_MAX_TOKENS,
-          system: cachedSystem(SELFHIVE_DOCTRINE),
+          system: cachedSystem(SELFHIVE_DOCTRINE, '1h'), // fully stable across every call, forever
           messages: [{ role: 'user', content: buildSubAgentPrompt(lead.taskContract, label, s.taskContract) }],
         },
       );
       const tb = resp.content.find((b) => b.type === 'text');
       const { output } = extractLeaf(tb && 'text' in tb ? tb.text : '');
-      return { lane: label, output, in: resp.usage?.input_tokens ?? 0, out: resp.usage?.output_tokens ?? 0 };
+      return {
+        lane: label, output,
+        in: resp.usage?.input_tokens ?? 0, out: resp.usage?.output_tokens ?? 0,
+        cacheRead: resp.usage?.cache_read_input_tokens ?? 0, cacheWrite: resp.usage?.cache_creation_input_tokens ?? 0,
+      };
     } catch {
-      return { lane: label, output: { summary: '(sub-agent unavailable)', confidence: 0, findings: [], citations: [] }, in: 0, out: 0 };
+      return { lane: label, output: { summary: '(sub-agent unavailable)', confidence: 0, findings: [], citations: [] }, in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
     }
   }));
   const simple: SubResult[] = subResults.map((r) => ({ lane: r.lane, output: r.output }));
   const subIn = subResults.reduce((s, r) => s + r.in, 0);
   const subOut = subResults.reduce((s, r) => s + r.out, 0);
-  const subUsd = costUsd(MODEL_LEAF, subIn, subOut);
+  const subCacheRead = subResults.reduce((s, r) => s + r.cacheRead, 0);
+  const subCacheWrite = subResults.reduce((s, r) => s + r.cacheWrite, 0);
+  const subUsd = costUsd(MODEL_LEAF, { input_tokens: subIn, output_tokens: subOut, cache_read_input_tokens: subCacheRead, cache_creation_input_tokens: subCacheWrite });
 
   // 2. The lead runs as the single visible tile, folding the sub-team's findings.
   const overlays = await loadActiveOverlaysForAgents(userId, [lead.role], classification, problem);
   const results = await executeAgents(
-    emit, problem, [lead], priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-4-5',
+    emit, problem, [lead], priorOutputs, (a) => models[a.id] ?? 'claude-sonnet-5',
     customAgents, bundle, overlays, true,
     { header: buildSubteamHeader(simple), context: buildSubteamContext(simple) },
     { userId, runId, phase: 'layer' },
@@ -457,7 +509,10 @@ export async function runLeadImpl(
 
   return {
     outputs: { [r.id]: { title: r.title, content: prose } } as Record<string, { title: string; content: string }>,
-    cost: { usd: r.usd + subUsd, in: r.in + subIn, out: r.out + subOut } as StepCost,
+    cost: {
+      usd: r.usd + subUsd, in: r.in + subIn, out: r.out + subOut,
+      cacheRead: r.cacheRead + subCacheRead, cacheWrite: r.cacheWrite + subCacheWrite,
+    } as StepCost,
   };
 }
 
@@ -499,7 +554,8 @@ export async function reduceImpl(
         {
           model: MODEL_LEAD,
           max_tokens: MAX_TOKENS_LEAD_REDUCE,
-          system: cachedSystem(SELFHIVE_DOCTRINE),
+          thinking: { type: 'disabled' }, // see executeAgents for why
+          system: cachedSystem(SELFHIVE_DOCTRINE, '1h'), // fully stable across every call, forever
           messages: [{ role: 'user', content: buildReduceContext(role, lanes) }],
         },
       );
@@ -508,7 +564,9 @@ export async function reduceImpl(
       cost = addCost(cost, {
         in: resp.usage?.input_tokens ?? 0,
         out: resp.usage?.output_tokens ?? 0,
-        usd: costUsd(MODEL_LEAD, resp.usage?.input_tokens ?? 0, resp.usage?.output_tokens ?? 0),
+        cacheRead: resp.usage?.cache_read_input_tokens ?? 0,
+        cacheWrite: resp.usage?.cache_creation_input_tokens ?? 0,
+        usd: costUsd(MODEL_LEAD, resp.usage ?? {}),
       });
     } catch {
       continue; // merge failed → leave the raw lanes in place (graceful)
@@ -567,14 +625,19 @@ export async function reinforceImpl(
     const re = await callModel(
       { userId, runId, role: 'chief_of_staff', phase: 'backfire' },
       {
-        model: 'claude-sonnet-4-5', max_tokens: 2000,
+        model: 'claude-sonnet-5', max_tokens: 2000,
+        thinking: { type: 'disabled' }, // see executeAgents for why
         system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + chiefOfStaffReinforcementPrompt(plan.agents, requests, budget.approved)),
         messages: [{ role: 'user', content: `The problem:\n${problem}\n\nCompose the approved reinforcements now.` }],
       },
     );
     const tb = re.content.find((b) => b.type === 'text');
     reRaw = tb && 'text' in tb ? tb.text : '';
-    cost = { in: re.usage?.input_tokens ?? 0, out: re.usage?.output_tokens ?? 0, usd: costUsd('claude-sonnet-4-5', re.usage?.input_tokens ?? 0, re.usage?.output_tokens ?? 0) };
+    cost = {
+      in: re.usage?.input_tokens ?? 0, out: re.usage?.output_tokens ?? 0,
+      cacheRead: re.usage?.cache_read_input_tokens ?? 0, cacheWrite: re.usage?.cache_creation_input_tokens ?? 0,
+      usd: costUsd('claude-sonnet-5', re.usage ?? {}),
+    };
   } catch {
     return { outputs: cleaned, newAgents: [], cost: { ...ZERO_COST } };
   }
@@ -594,7 +657,7 @@ export async function reinforceImpl(
     const reAgent = newAgents.find((a) => a.id === r.id)!;
     const { cleaned: c } = extractReinforcement(reAgent, r.content); // never recurse
     merged[r.id] = { title: r.title, content: c };
-    cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out });
+    cost = addCost(cost, { usd: r.usd, in: r.in, out: r.out, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite });
   }
   return { outputs: merged, newAgents, cost };
 }
@@ -635,7 +698,7 @@ export async function formatImpl(
         {
           model: EDITOR_MODEL,
           max_tokens: EDITOR_MAX_TOKENS,
-          system: cachedSystem(editorSystemPrompt(family)),
+          system: cachedSystem(editorSystemPrompt(family), '1h'), // stable per family, reused across every run
           messages: [{ role: 'user', content: buildEditorUserMessage({ role: job.role, title: job.title, source: prose, figuresJson: json }) }],
         },
         { maxRetries: 3, timeout: 60_000 },
@@ -687,24 +750,33 @@ export async function criticImpl(
   // past critiques — and inject them so it red-teams WITH MEMORY (respects the kill switch).
   const antibodyMap = await loadActiveOverlaysForAgents(userId, [ANTIBODY_AGENT_ID], classification, problem);
   const immuneMemory = formatAntibodiesForPrompt(antibodyMap[ANTIBODY_AGENT_ID] ?? []);
-  let critique = ''; let inTok = 0; let outTok = 0;
+  let critique = ''; let inTok = 0; let outTok = 0; let cacheRead = 0; let cacheWrite = 0;
   const stream = getAnthropic().messages.stream({
-    model: 'claude-sonnet-4-5', max_tokens: CRITIC_MAX_TOKENS,
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt() + immuneMemory + criticEffect.systemPromptAddition),
+    model: 'claude-sonnet-5', max_tokens: CRITIC_MAX_TOKENS,
+    thinking: { type: 'disabled' }, // see executeAgents for why
+    // criticSystemPrompt() is a static string, identical for every critic call in
+    // every run — the cacheable prefix. Immune memory and resource-grant text
+    // mutate over time, so they stay uncached, after the breakpoint.
+    system: splitCachedSystem(SELFHIVE_DOCTRINE + '\n' + criticSystemPrompt(), immuneMemory + criticEffect.systemPromptAddition),
     messages: [{ role: 'user', content: buildCriticContext(problem, team) }],
     ...(criticEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });
   for await (const ev of stream) {
-    if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
+    if (ev.type === 'message_start') {
+      inTok = ev.message.usage?.input_tokens ?? 0;
+      cacheRead = ev.message.usage?.cache_read_input_tokens ?? 0;
+      cacheWrite = ev.message.usage?.cache_creation_input_tokens ?? 0;
+    }
     if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
     if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
       critique += ev.delta.text;
       await emit('agent_delta', { agentId: 'critic', delta: ev.delta.text });
     }
   }
-  await recordCall({ userId, runId, nodeId: 'critic', role: 'critic', phase: 'critic', model: 'claude-sonnet-4-5', usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
+  const criticUsage = { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite };
+  await recordCall({ userId, runId, nodeId: 'critic', role: 'critic', phase: 'critic', model: 'claude-sonnet-5', usage: criticUsage, ok: true });
   await emit('agent_done', { agentId: 'critic', artifact: critique });
-  return { critique, cost: { in: inTok, out: outTok, usd: costUsd('claude-sonnet-4-5', inTok, outTok) } };
+  return { critique, cost: { in: inTok, out: outTok, cacheRead, cacheWrite, usd: costUsd('claude-sonnet-5', criticUsage) } };
 }
 
 // ─── STEP 4: synthesize → answer ──────────────────────────────────────
@@ -719,29 +791,38 @@ export async function synthesizeImpl(
   const team = Object.values(outputs);
   const ctx = buildSynthesizerContext(problem, team) + `\n\n--- CRITIC'S CHALLENGE (address it) ---\n${critique}`;
   const synthEffect = effectFor(bundle, 'synthesizer');
-  let answer = ''; let inTok = 0; let outTok = 0;
+  let answer = ''; let inTok = 0; let outTok = 0; let cacheRead = 0; let cacheWrite = 0;
   const stream = getAnthropic().messages.stream({
     model: SYNTHESIZER_MODEL, max_tokens: SYNTH_MAX_TOKENS,
-    system: cachedSystem(synthesizerSystemPrompt(isRegulated) + loadFounderManifest() + synthEffect.systemPromptAddition),
+    thinking: { type: 'disabled' }, // see executeAgents for why
+    // synthesizerSystemPrompt(isRegulated) and the founder manifest are both
+    // stable (the manifest changes only when the founder edits it, not per
+    // run) — cache them; only the resource-grant addition is per-run.
+    system: splitCachedSystem(synthesizerSystemPrompt(isRegulated) + loadFounderManifest(), synthEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
     ...(synthEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });
   for await (const ev of stream) {
-    if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
+    if (ev.type === 'message_start') {
+      inTok = ev.message.usage?.input_tokens ?? 0;
+      cacheRead = ev.message.usage?.cache_read_input_tokens ?? 0;
+      cacheWrite = ev.message.usage?.cache_creation_input_tokens ?? 0;
+    }
     if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
     if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
       answer += ev.delta.text;
       await emit('agent_delta', { agentId: 'synthesizer', delta: ev.delta.text });
     }
   }
-  await recordCall({ userId, runId, nodeId: 'synthesizer', role: 'synthesizer', phase: 'synthesize', model: SYNTHESIZER_MODEL, usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
+  const synthUsage = { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite };
+  await recordCall({ userId, runId, nodeId: 'synthesizer', role: 'synthesizer', phase: 'synthesize', model: SYNTHESIZER_MODEL, usage: synthUsage, ok: true });
   if (isRegulated && !answer.includes(DISCLAIMER)) {
     const tail = `\n\n---\n${DISCLAIMER}`;
     answer += tail;
     await emit('agent_delta', { agentId: 'synthesizer', delta: tail });
   }
   await emit('answer', { artifact: answer });
-  return { answer, cost: { in: inTok, out: outTok, usd: costUsd(SYNTHESIZER_MODEL, inTok, outTok) } };
+  return { answer, cost: { in: inTok, out: outTok, cacheRead, cacheWrite, usd: costUsd(SYNTHESIZER_MODEL, synthUsage) } };
 }
 
 // ─── STEP 5: trainer ──────────────────────────────────────────────────
@@ -760,24 +841,30 @@ export async function trainerImpl(
     answer
   ) + trainerHistory;
   const trainerEffect = effectFor(bundle, 'trainer');
-  let report = ''; let inTok = 0; let outTok = 0;
+  let report = ''; let inTok = 0; let outTok = 0; let cacheRead = 0; let cacheWrite = 0;
   const stream = getAnthropic().messages.stream({
     model: TRAINER_MODEL, max_tokens: TRAINER_MAX_TOKENS,
-    system: cachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt() + trainerEffect.systemPromptAddition),
+    thinking: { type: 'disabled' }, // see executeAgents for why
+    system: splitCachedSystem(SELFHIVE_DOCTRINE + '\n' + dynamicTrainerSystemPrompt(), trainerEffect.systemPromptAddition),
     messages: [{ role: 'user', content: ctx }],
     ...(trainerEffect.enableWebSearch ? { tools: [WEB_SEARCH_TOOL] } : {}),
   });
   for await (const ev of stream) {
-    if (ev.type === 'message_start') inTok = ev.message.usage?.input_tokens ?? 0;
+    if (ev.type === 'message_start') {
+      inTok = ev.message.usage?.input_tokens ?? 0;
+      cacheRead = ev.message.usage?.cache_read_input_tokens ?? 0;
+      cacheWrite = ev.message.usage?.cache_creation_input_tokens ?? 0;
+    }
     if (ev.type === 'message_delta') outTok = ev.usage?.output_tokens ?? outTok;
     if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
       report += ev.delta.text;
       await emit('agent_delta', { agentId: 'trainer', delta: ev.delta.text });
     }
   }
-  await recordCall({ userId, runId, nodeId: 'trainer', role: 'trainer', phase: 'trainer', model: TRAINER_MODEL, usage: { input_tokens: inTok, output_tokens: outTok }, ok: true });
+  const trainerUsage = { input_tokens: inTok, output_tokens: outTok, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite };
+  await recordCall({ userId, runId, nodeId: 'trainer', role: 'trainer', phase: 'trainer', model: TRAINER_MODEL, usage: trainerUsage, ok: true });
   await emit('trainer_done', { agentId: 'trainer', artifact: report });
-  return { report, cost: { in: inTok, out: outTok, usd: costUsd(TRAINER_MODEL, inTok, outTok) } };
+  return { report, cost: { in: inTok, out: outTok, cacheRead, cacheWrite, usd: costUsd(TRAINER_MODEL, trainerUsage) } };
 }
 
 // ─── STEP 6: distill trainer advice into per-agent overlays ──────────
@@ -970,7 +1057,14 @@ export async function finalizeImpl(
     try {
       await sb.from('run_costs').insert({
         run_id: runId, user_id: userId, classification: plan.classification,
-        input_tokens: totalCost.in, output_tokens: totalCost.out, cost_usd: Number(totalCost.usd.toFixed(4)), agent_count: plan.agents.length,
+        input_tokens: totalCost.in, output_tokens: totalCost.out,
+        // StepCost has carried these since the caching work; the insert used to
+        // drop them, so run_costs reported 0 cache activity for every run even
+        // once the columns existed. The CFO reads this table to learn per-task
+        // cost — leaving them out understates how much caching is saving.
+        cache_read_tokens: totalCost.cacheRead ?? 0,
+        cache_write_tokens: totalCost.cacheWrite ?? 0,
+        cost_usd: Number(totalCost.usd.toFixed(4)), agent_count: plan.agents.length,
       });
       await emit('run_cost', { note: `$${totalCost.usd.toFixed(3)} · ${totalCost.in.toLocaleString()} in / ${totalCost.out.toLocaleString()} out` });
     } catch { /* non-fatal */ }

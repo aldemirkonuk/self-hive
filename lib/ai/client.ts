@@ -45,6 +45,32 @@ export function getAnthropic(opts?: ClientOpts): Anthropic {
 type CreateParams = Anthropic.MessageCreateParamsNonStreaming;
 
 /**
+ * Turn an Anthropic SDK failure into one legible line.
+ *
+ * `agent_calls` stores `ok: false` and nothing else, and every caller of
+ * callModel catches into a constant ('model_unavailable', 'AI_DISABLED'). That
+ * made a real production outage indistinguishable from a code bug: an expired
+ * key, an exhausted credit balance, a 429, and a malformed request all looked
+ * identical in the digest, in /reports, and in the logs. Same failure mode as
+ * `describeWorkflowError()` — a failure recorded as an uninformative constant
+ * is a failure nobody can act on.
+ *
+ * Status and error TYPE come first because those are what distinguish an
+ * operator problem (fix the env var, add credit) from a code problem.
+ */
+export function describeModelError(e: unknown): string {
+  if (e instanceof AIDisabledError) return 'AI_DISABLED (founder kill switch)';
+  if (e instanceof Anthropic.APIError) {
+    const body = e.error as { error?: { type?: string; message?: string } } | undefined;
+    const type = body?.error?.type;
+    const msg = body?.error?.message ?? e.message;
+    return `HTTP ${e.status ?? '?'}${type ? ` ${type}` : ''}: ${msg}`.slice(0, 300);
+  }
+  if (e instanceof Error) return `${e.name}: ${e.message}`.slice(0, 300);
+  return String(e).slice(0, 300);
+}
+
+/**
  * Flag-checked, metered messages.create. Metering cannot be skipped.
  */
 export async function callModel(
@@ -66,6 +92,12 @@ export async function callModel(
     return res;
   } catch (e) {
     if (!(e instanceof AIDisabledError)) {
+      // The single chokepoint every model call passes through, so this is the
+      // one place a failure is guaranteed to be seen — log the real cause here
+      // rather than relying on callers, which all catch into a constant.
+      console.warn(
+        `[selfhive] model call failed · ${ctx.role}/${ctx.phase ?? '-'} · ${String(params.model)} · ${describeModelError(e)}`,
+      );
       await recordCall({
         ...ctx,
         model: String(params.model),

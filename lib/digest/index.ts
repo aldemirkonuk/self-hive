@@ -5,7 +5,7 @@
 // no source of truth, it just summarizes. One cheap Haiku call turns the facts
 // into prose; a quiet window skips that call entirely and costs nothing.
 
-import { callModel, isAIEnabled } from '@/lib/ai/client';
+import { callModel, describeModelError, isAIEnabled } from '@/lib/ai/client';
 import { cachedSystem } from '@/lib/ai/prompt-cache';
 import { getAdminSupabase } from '@/lib/db/supabase-admin';
 import { getUserSettingsAdmin } from '@/lib/db/settings';
@@ -175,7 +175,12 @@ async function narrate(
     const tb = resp.content.find((b) => b.type === 'text');
     const text = tb && 'text' in tb ? stripMarkdown(tb.text) : '';
     return text || deterministicSummary(stats, win);
-  } catch {
+  } catch (e) {
+    // The fallback is deliberately indistinguishable from a real digest in the
+    // UI, which is exactly why the fall BACK has to be loud. Silently serving
+    // the deterministic summary for days would look like the narrator simply
+    // got terser.
+    console.warn(`[selfhive] digest: narrator unavailable, falling back to the deterministic summary — ${describeModelError(e)}`);
     return deterministicSummary(stats, win);
   }
 }

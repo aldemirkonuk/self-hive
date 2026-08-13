@@ -15,7 +15,7 @@
 // immutability) so the model's output can never violate them — the LLM
 // proposes, the code disposes.
 
-import { callModel, isAIEnabled } from '@/lib/ai/client';
+import { callModel, describeModelError, isAIEnabled } from '@/lib/ai/client';
 import { cachedSystem } from '@/lib/ai/prompt-cache';
 import { scoutGaps, type CurriculumGap } from '@/lib/professor/scout';
 import type { DigestStats } from '@/lib/digest/core';
@@ -345,8 +345,11 @@ export async function runGoalSettingPass(
     );
     const tb = resp.content.find((b) => b.type === 'text');
     raw = tb && 'text' in tb ? tb.text : '';
-  } catch {
-    return { ...empty, remembered, skipped: true, reason: 'model_unavailable' };
+  } catch (e) {
+    // Carry the CAUSE, not just the fact. A bare 'model_unavailable' cannot
+    // tell an expired key from an exhausted balance from a malformed request,
+    // and this response is the founder's only view of the daily pass.
+    return { ...empty, remembered, skipped: true, reason: `model_unavailable — ${describeModelError(e)}` };
   }
 
   const actions = selectGoalActions(parseGoalDecisions(raw), ledger, now);

@@ -21,7 +21,7 @@ import {
   type ReinforcementRequest,
 } from './library/reinforcement';
 import { formatGoalsForCoS } from './goals/core';
-import { loadActiveGoals } from './goals/store';
+import { loadGoalLedger } from './goals/store';
 import { criticSystemPrompt, buildCriticContext } from './library/critic';
 import { synthesizerSystemPrompt, buildSynthesizerContext } from './library/synthesizer';
 import { dynamicTrainerSystemPrompt, buildDynamicTrainerContext } from './trainer/dynamic-trainer';
@@ -205,8 +205,9 @@ export async function* runDynamicTeam(
   let planRaw = '';
   try {
     const cosEffect = effectFor(BUNDLE, 'chief_of_staff');
-    // STANDING GOALS — the hive's cross-run agenda, on every compose.
-    const goalsBlock = formatGoalsForCoS(await loadActiveGoals(userId));
+    // THE GOAL LEDGER — the hive's cross-run agenda AND its memory of the goals
+    // it already closed, on every compose.
+    const goalsBlock = formatGoalsForCoS(await loadGoalLedger(userId));
     const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
     const cos = await callModel(
       { runId, userId, role: 'chief_of_staff', phase: 'compose' },

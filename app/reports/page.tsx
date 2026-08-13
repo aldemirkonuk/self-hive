@@ -22,7 +22,7 @@ export default async function ReportsPage() {
         const [d, g] = await Promise.all([
           sb.from('daily_digests').select('id, digest_date, summary, stats')
             .eq('user_id', data.user.id).order('digest_date', { ascending: false }).limit(30),
-          sb.from('hive_goals').select('id, title, rationale, status, created_by, target_metric, evidence, created_at, updated_at')
+          sb.from('hive_goals').select('id, title, rationale, status, created_by, target_metric, evidence, created_at, updated_at, closed_at, closure_note')
             .eq('user_id', data.user.id).order('updated_at', { ascending: false }).limit(50),
         ]);
         digests = (d.data ?? []) as DigestRow[];
@@ -36,6 +36,8 @@ export default async function ReportsPage() {
           evidence: (r.evidence as Record<string, unknown> | null) ?? null,
           createdAt: String(r.created_at),
           updatedAt: String(r.updated_at),
+          closedAt: (r.closed_at as string | null) ?? null,
+          closureNote: (r.closure_note as string | null) ?? null,
         }));
       } catch {
         /* tables may not exist until migration 0013 is applied */

@@ -50,7 +50,7 @@ export async function GET(req: NextRequest) {
 
   const goals = isAIEnabled()
     ? await runGoalSettingPass(userId, digest.stats, digest.summary, { digestId: digest.digestId })
-    : { opened: [], closed: [], skipped: true, reason: 'AI_DISABLED' as const };
+    : { opened: [], closed: [], rejected: [], remembered: 0, skipped: true, reason: 'AI_DISABLED' as const };
 
   return json(200, {
     ok: true,

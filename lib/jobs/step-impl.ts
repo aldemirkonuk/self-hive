@@ -37,7 +37,7 @@ import { distillerSystemPrompt, parseDistillerOutput, filterGeneralizable, type 
 import { immunizerSystemPrompt, formatAntibodiesForPrompt, ANTIBODY_AGENT_ID } from '../library/immunizer';
 import { loadActiveOverlaysForAgents, formatOverlaysForPrompt, insertOverlays, promotePinsForUser, listActiveAdviceForRoles, type OverlayRow } from '../db/overlays';
 import { formatGoalsForCoS } from '../goals/core';
-import { loadActiveGoals } from '../goals/store';
+import { loadGoalLedger } from '../goals/store';
 import { getUserSettingsAdmin } from '../db/settings';
 import { auditAutoApproved } from '../approvals/policy';
 import { loadFounderManifest, loadCanonFor } from '../canon-loader';
@@ -149,9 +149,10 @@ export async function composeImpl(
 
   const customDescs = Object.values(customAgents).map((c) => ({ id: c.id, title: c.title, domain: c.domain, mandate: c.successCriteria }));
   const cosEffect = effectFor(bundle, 'chief_of_staff');
-  // STANDING GOALS — the hive's cross-run agenda, injected on EVERY compose so
-  // goals steer team composition (and flow downstream through task contracts).
-  const goalsBlock = formatGoalsForCoS(await loadActiveGoals(userId));
+  // THE GOAL LEDGER — the hive's cross-run agenda AND its memory of the goals
+  // it already closed, injected on EVERY compose so both steer team composition
+  // (and flow downstream through task contracts).
+  const goalsBlock = formatGoalsForCoS(await loadGoalLedger(userId));
   const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
   const cos = await callModel(
     { userId, runId, role: 'chief_of_staff', phase: 'compose' },

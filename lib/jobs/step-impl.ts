@@ -1124,7 +1124,22 @@ export async function finalizeImpl(
     try {
       const picks = await extractPredictions(answer);
       if (picks.length > 0) {
-        await recordAndAllocate(userId, runId, picks, sb);
+        const alloc = await recordAndAllocate(userId, runId, picks, sb);
+        // A REFUSED POSITION IS A RESULT, not an absence of one. Left only in
+        // the server log, "the team proposed 6 positions and 1 opened" is
+        // indistinguishable from a broken extractor. This puts the guard's
+        // reasoning in the run timeline where the founder actually looks —
+        // and a run that keeps refusing itself is the clearest possible
+        // signal that composition, not execution, is what needs fixing.
+        if (alloc.rejected.length > 0) {
+          await emit('positions_refused', {
+            proposed: picks.length,
+            opened: alloc.positions,
+            refused: alloc.rejected.map((r) => ({
+              ticker: r.ticker, direction: r.direction, reason: r.reason, detail: r.detail,
+            })),
+          });
+        }
       }
     } catch { /* non-fatal */ }
   } else if (userId && answer) {

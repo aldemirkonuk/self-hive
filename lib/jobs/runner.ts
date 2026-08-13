@@ -257,8 +257,17 @@ async function executeDynamicJobInner(
     try {
       const picks = await extractPredictions(finalAnswer);
       if (picks.length > 0) {
-        const { positions, allocated } = await recordAndAllocate(userId, runId, picks);
-        await writeEvent('portfolio_allocated', { positions, allocated });
+        const { positions, allocated, rejected } = await recordAndAllocate(userId, runId, picks);
+        await writeEvent('portfolio_allocated', { positions, allocated, proposed: picks.length });
+        // Same as the workflow path: a refusal is a result, and it belongs in
+        // the timeline rather than only in a server log the founder never sees.
+        if (rejected.length > 0) {
+          await writeEvent('positions_refused', {
+            proposed: picks.length,
+            opened: positions,
+            refused: rejected.map((r) => ({ ticker: r.ticker, direction: r.direction, reason: r.reason, detail: r.detail })),
+          });
+        }
       }
     } catch (e) {
       console.error('[selfhive] outcome-loop allocation failed:', e);

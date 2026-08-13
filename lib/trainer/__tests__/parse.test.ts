@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseDynamicTrainerScores, parseTrainerScores } from '../parse.ts';
+import { parseDynamicTrainerScores } from '../parse.ts';
 
 // ── dynamic flow (arbitrary agent titles) ──────────────────────────────
 
@@ -61,28 +61,4 @@ test('parseDynamicTrainerScores: empty / unstructured report → empty object', 
 
 // ── fixed flow (known role ids: pm/cto/engineer/qa/ceo) ─────────────────
 
-test('parseTrainerScores: parses fixed-role headers and stops at the next role/section', () => {
-  const report = `
-**PM — 7.4/10 — confidence 0.85**
-- specificity: 8.4
-- scope: 8.0
-THE ONE THING: split acceptance criteria into testable units.
 
-**CTO — 6.0/10 — confidence 0.7**
-- feasibility: 6.0
-THE ONE THING: name the datastore explicitly.
-`;
-  const scores = parseTrainerScores(report);
-  assert.equal(scores.pm.overall, 7.4);
-  assert.equal(scores.pm.confidence, 0.85);
-  assert.match(scores.pm.oneThing, /testable units/i);
-  // The PM block must not absorb the CTO's ONE THING.
-  assert.ok(!/datastore/i.test(scores.pm.oneThing));
-  assert.equal(scores.cto.overall, 6.0);
-});
-
-test('parseTrainerScores: missing agents are simply absent (never throws)', () => {
-  const scores = parseTrainerScores('**PM — 5/10 — confidence 0.6**');
-  assert.equal(scores.pm.overall, 5);
-  assert.equal(scores.cto, undefined);
-});

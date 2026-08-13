@@ -21,7 +21,6 @@ const TABS = [
   { href: '/dashboard', label: 'DASHBOARD' },
   { href: '/founder', label: 'FOUNDER' },
   { href: '/training', label: 'TRAINING' },
-  { href: '/pipeline', label: 'PIPELINE·legacy' },
 ];
 
 interface NavProps {

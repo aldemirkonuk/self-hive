@@ -649,7 +649,7 @@ export async function getPortfolioSnapshot(userId: string, sbOverride?: SB): Pro
 
   const { data: state } = await sb
     .from('portfolio_state')
-    .select('starting_capital, cash, realized_pnl, wins, losses')
+    .select('starting_capital, cash, realized_pnl, wins, losses, ledger_epoch')
     .eq('user_id', userId)
     .single();
   if (!state) {
@@ -679,11 +679,16 @@ export async function getPortfolioSnapshot(userId: string, sbOverride?: SB): Pro
     });
   }
 
+  // Scoped to the current epoch, like the calibration ledger. Without this the
+  // page renders a "0W / 0L" header directly above a list of losses from a
+  // retired epoch — two true numbers that contradict each other, which reads
+  // as broken rather than honest. The retired epoch gets its own banner.
   const { data: resolvedRows } = await sb
     .from('predictions')
     .select('ticker, direction, outcome_pct, outcome_correct')
     .eq('user_id', userId)
     .eq('status', 'resolved')
+    .eq('ledger_epoch', Number(state.ledger_epoch ?? 1))
     .order('checked_at', { ascending: false })
     .limit(20);
 

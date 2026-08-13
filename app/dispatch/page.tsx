@@ -90,6 +90,39 @@ export default async function DispatchPage() {
             </div>
           ) : (
             <>
+              {/* RETIRED EPOCHS — rendered ABOVE the tiles, deliberately.
+                  After a reset those tiles read +$0 / 0W / 0L, which is the
+                  picture of a company that has never lost. The paragraph above
+                  promises losses are shown as plainly as wins; this banner is
+                  what makes that promise true rather than a slogan. */}
+              {record.priorEpochs.length > 0 && (
+                <div className="rounded-lg p-4 mb-4" style={{ background: 'var(--bg-panel)', border: '1px solid #f59e0b' }}>
+                  <p style={{ fontSize: '0.6rem', color: '#f59e0b', letterSpacing: '0.1em', fontWeight: 700 }}>
+                    THIS IS NOT THE FIRST LEDGER
+                  </p>
+                  <p style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
+                    The record above starts from a reset. Earlier epochs were <b style={{ color: 'var(--text-primary)' }}>retired, not
+                    deleted</b> — every prediction is still on file. What they cost:
+                  </p>
+                  {record.priorEpochs.map((e) => {
+                    const pnl = e.finalEquity - e.startingCapital;
+                    const pct = e.startingCapital > 0 ? (pnl / e.startingCapital) * 100 : 0;
+                    const decided = e.wins + e.losses;
+                    return (
+                      <div key={e.epoch} style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+                        <div style={{ fontSize: '0.62rem', color: 'var(--text-primary)' }}>
+                          Epoch {e.epoch} · closed {e.closedAt.slice(0, 10)} at{' '}
+                          <b style={{ color: pnlColor(pnl) }}>${Math.round(e.finalEquity).toLocaleString()} ({signedPct(pct, 2)})</b>
+                          {' · '}{e.wins}W / {e.losses}L
+                          {decided > 0 && ` (${Math.round((e.wins / decided) * 100)}%)`}
+                        </div>
+                        <div style={{ fontSize: '0.55rem', color: 'var(--text-dim)', marginTop: 3, lineHeight: 1.5 }}>{e.reason}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))' }}>
                 <Tile label="TOTAL P&L" value={signedMoney(record.totalPnl)} sub={signedPct(record.totalPct, 2)} color={pnlColor(record.totalPnl)} />
                 <Tile label="WIN RATE" value={record.winRate === null ? '—' : `${record.winRate.toFixed(0)}%`} sub={`${record.wins}W / ${record.losses}L`} color="var(--text-primary)" />

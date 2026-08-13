@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { isAdminConfigured } from '@/lib/db/supabase-admin';
+import { getAdminSupabase, isAdminConfigured } from '@/lib/db/supabase-admin';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { reconcileConflicts } from '@/lib/markets/portfolio';
 
@@ -26,7 +26,11 @@ export async function POST(req: NextRequest) {
   if (!data.user) return json(401, { error: 'Sign in first' });
 
   const execute = new URL(req.url).searchParams.get('execute') === 'true';
-  const result = await reconcileConflicts(data.user.id, { dryRun: !execute, sb });
+  // Session client authenticates; admin client does the work. Closing a
+  // position also calls portfolio_credit, and keeping every write on one
+  // service-role client means the whole operation succeeds or fails together
+  // rather than half-applying against a mix of RLS surfaces.
+  const result = await reconcileConflicts(data.user.id, { dryRun: !execute, sb: getAdminSupabase() });
 
   return json(200, {
     ok: true,

@@ -566,8 +566,14 @@ export async function resetPaperPortfolio(
   }
 
   // The audit row goes in BEFORE the state is zeroed, so a failure between the
-  // two leaves the evidence rather than losing it.
-  await sb.from('portfolio_resets').insert({
+  // two leaves the evidence rather than losing it — and if it cannot be
+  // written, the reset is ABANDONED rather than completed silently. An epoch
+  // retired with no record of what it cost is indistinguishable from one
+  // deleted, which is the single thing this design must never permit.
+  //
+  // (portfolio_resets carries no INSERT policy on purpose, so this requires the
+  // service-role client. A caller passing a session client fails loudly here.)
+  const { error: auditErr } = await sb.from('portfolio_resets').insert({
     user_id: userId,
     epoch_closed: epochClosed,
     epoch_opened: epochClosed + 1,
@@ -579,6 +585,13 @@ export async function resetPaperPortfolio(
     losses: closing.losses,
     final_equity: closing.equity,
   });
+  if (auditErr) {
+    throw new Error(
+      `reset aborted: could not write the portfolio_resets audit row (${auditErr.message}). ` +
+        'Positions have been closed but the ledger epoch was NOT rolled, so nothing has been retired. ' +
+        'This write requires the service-role client.',
+    );
+  }
 
   await sb.from('portfolio_state').update({
     cash: startCap,

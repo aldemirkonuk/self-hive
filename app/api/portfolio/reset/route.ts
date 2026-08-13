@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { isAdminConfigured } from '@/lib/db/supabase-admin';
+import { getAdminSupabase, isAdminConfigured } from '@/lib/db/supabase-admin';
 import { getServerSupabase, isSupabaseConfigured } from '@/lib/db/supabase-server';
 import { resetPaperPortfolio } from '@/lib/markets/portfolio';
 
@@ -30,7 +30,20 @@ export async function POST(req: NextRequest) {
     return json(400, { error: 'reason is required to execute a reset — an epoch retired without a stated reason is indistinguishable from one hidden' });
   }
 
-  const result = await resetPaperPortfolio(data.user.id, { dryRun: !execute, reason, sb });
+  // Authenticate with the SESSION client above; do the work with the ADMIN one.
+  //
+  // portfolio_resets carries only an owner-SELECT policy, deliberately: the
+  // audit row is what stops a reset laundering the record, so it must not be
+  // insertable by anything holding a browser session — including via PostgREST
+  // directly. Passing the session client here would leave that INSERT silently
+  // rejected by RLS, zeroing the portfolio while writing no evidence that an
+  // epoch was ever retired. Which is the exact failure the epoch design exists
+  // to prevent, arriving through the back door.
+  const result = await resetPaperPortfolio(data.user.id, {
+    dryRun: !execute,
+    reason,
+    sb: getAdminSupabase(),
+  });
 
   return json(200, {
     ok: true,

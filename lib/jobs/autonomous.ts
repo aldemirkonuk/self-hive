@@ -1,7 +1,7 @@
 import { callModel, isAIEnabled } from '@/lib/ai/client';
 import { getAdminSupabase, isAdminConfigured } from '../db/supabase-admin';
 import { getFounderUserId } from '../db/founder';
-import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport } from '../markets/portfolio';
+import { getPortfolioSnapshot, checkOutcomes, getCalibrationReport, getResetHistory } from '../markets/portfolio';
 import { formatCalibrationLine, computeCalibration, type CalibrationReport, type CalibrationVerdict } from '../markets/calibration';
 import { buildPublicRecord, composeDispatch } from './dispatch';
 import { getOverallCalibration, getClaimCoverage } from '../claims/store';
@@ -174,12 +174,26 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const snap = await getPortfolioSnapshot(userId, sb as any);
+    // Retired epochs ride along so a reset can never launder the record: the
+    // headline shows the current ledger, this shows what came before it.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const resets = await getResetHistory(userId, sb as any);
     dispatch = composeDispatch(
       buildPublicRecord({
         snapshot: snap,
         calibration: calReport ?? computeCalibration([]),
         generatedAt: new Date().toISOString(),
         latestCall: problem,
+        priorEpochs: resets.map((r) => ({
+          epoch: r.epochClosed,
+          reason: r.reason,
+          realizedPnl: r.realizedPnl,
+          wins: r.wins,
+          losses: r.losses,
+          finalEquity: r.finalEquity,
+          startingCapital: snap?.startingCapital ?? 100_000,
+          closedAt: r.createdAt,
+        })),
       })
     );
     console.log(`[autonomous] dispatch composed (${dispatch.length} chars)`);

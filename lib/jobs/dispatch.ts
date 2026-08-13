@@ -43,6 +43,26 @@ export interface PublicRecord {
   recentResolved: ResolvedCall[];
   /** The call the hive made this cycle, if any (the new bet on the table). */
   latestCall?: string;
+  /**
+   * Epochs this book has retired, newest first.
+   *
+   * This exists so a reset cannot launder a bad record. The header above shows
+   * the CURRENT epoch, which after a reset reads $100,000 and 0W/0L — and this
+   * page opens by promising that losses are included by design. Carrying the
+   * retired epochs is what keeps that promise true.
+   */
+  priorEpochs: PriorEpoch[];
+}
+
+export interface PriorEpoch {
+  epoch: number;
+  reason: string;
+  realizedPnl: number;
+  wins: number;
+  losses: number;
+  finalEquity: number;
+  startingCapital: number;
+  closedAt: string;
 }
 
 /**
@@ -56,6 +76,7 @@ export function buildPublicRecord(opts: {
   generatedAt: string;
   latestCall?: string;
   recentLimit?: number;
+  priorEpochs?: PriorEpoch[];
 }): PublicRecord {
   const { snapshot, calibration, generatedAt, latestCall } = opts;
   const limit = opts.recentLimit ?? 8;
@@ -93,6 +114,7 @@ export function buildPublicRecord(opts: {
       correct: r.correct,
     })),
     latestCall,
+    priorEpochs: opts.priorEpochs ?? [],
   };
 }
 
@@ -126,6 +148,20 @@ export function composeDispatch(record: PublicRecord): string {
   const wr = record.winRate === null ? '—' : `${record.winRate.toFixed(0)}%`;
   lines.push(`**Record:** ${record.wins}W / ${record.losses}L (win rate ${wr}) · ${record.openPositions} open`);
   lines.push('');
+
+  // RETIRED EPOCHS. Printed immediately under the headline, not buried at the
+  // bottom, because after a reset the headline reads like a company that has
+  // never lost. This is the line that keeps "losses included, by design" true.
+  if (record.priorEpochs.length > 0) {
+    lines.push('**This is not the first ledger.** Prior epochs were retired, not deleted:');
+    for (const e of record.priorEpochs) {
+      const pnl = e.finalEquity - e.startingCapital;
+      const pct = e.startingCapital > 0 ? (pnl / e.startingCapital) * 100 : 0;
+      const ewr = e.wins + e.losses > 0 ? `${Math.round((e.wins / (e.wins + e.losses)) * 100)}%` : '—';
+      lines.push(`- Epoch ${e.epoch} closed ${e.closedAt.slice(0, 10)} at ${money(e.finalEquity)} (${signedPct(pct, 2)}) · ${e.wins}W / ${e.losses}L (${ewr}) — ${e.reason}`);
+    }
+    lines.push('');
+  }
 
   // The grade on the grade — calibration is the value of the record.
   lines.push(`**Calibration:** ${record.calibration.verdict.toUpperCase()} — ${VERDICT_NOTE[record.calibration.verdict]}.`);

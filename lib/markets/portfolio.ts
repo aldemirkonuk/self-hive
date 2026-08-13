@@ -62,10 +62,11 @@ export async function recordAndAllocate(
 
   const { data: state } = await sb
     .from('portfolio_state')
-    .select('cash, starting_capital')
+    .select('cash, starting_capital, ledger_epoch')
     .eq('user_id', userId)
     .single();
   if (!state) return { allocated: 0, positions: 0, rejected: [] };
+  const epoch = Number(state.ledger_epoch ?? 1);
 
   // THE OPEN BOOK. Screening needs to know what the hive already holds — every
   // contradictory pair and redundant stack in the portfolio got there because
@@ -114,6 +115,9 @@ export async function recordAndAllocate(
         ticker: pick.ticker, direction: pick.direction, thesis: pick.thesis,
         entry_price: entry, horizon_days: pick.horizonDays, confidence: pick.confidence,
         confidence_stated: pick.confidenceStated !== false,
+        // Stamped at write time so a later reset cannot retroactively decide
+        // which era a prediction belonged to.
+        ledger_epoch: epoch,
         check_at: checkAt, status: 'open',
       })
       .select('id')
@@ -274,17 +278,32 @@ export async function checkOutcomes(userId: string, sbOverride?: SB): Promise<{
  * rising skill score it returns is the moat appreciating; a negative one past
  * MIN_SAMPLE is the kill signal (the corpus is breeding confident wrongness).
  */
+/** The era the ledger is currently scoring. Defaults to 1 for an unreset book. */
+export async function getCurrentEpoch(userId: string, sbOverride?: SB): Promise<number> {
+  if (!isSupabaseConfigured()) return 1;
+  const sb = sbOverride ?? (await getServerSupabase());
+  const { data } = await sb.from('portfolio_state').select('ledger_epoch').eq('user_id', userId).single();
+  return Number(data?.ledger_epoch ?? 1);
+}
+
 export async function getResolvedPredictionRows(userId: string, sbOverride?: SB): Promise<ResolvedPrediction[]> {
   if (!isSupabaseConfigured()) return [];
   const sb = sbOverride ?? (await getServerSupabase());
+  const epoch = await getCurrentEpoch(userId, sb);
 
   // ticker + direction are carried so measureContamination() can tell an
   // independent bet from the same bet counted three times.
+  //
+  // Scoped to the CURRENT epoch. Rows from a closed epoch are still on disk and
+  // still resolved — they are simply no longer what this company is being
+  // graded on, because the execution layer that produced them has been
+  // replaced. See migration 0017 and portfolio_resets for the audit trail.
   const { data } = await sb
     .from('predictions')
     .select('confidence, outcome_correct, outcome_pct, ticker, direction')
     .eq('user_id', userId)
     .eq('status', 'resolved')
+    .eq('ledger_epoch', epoch)
     .not('confidence', 'is', null)
     .not('outcome_correct', 'is', null);
 
@@ -442,6 +461,167 @@ export async function loadCalibrationBlock(userId: string | null, sbOverride?: S
     return '';
   }
 }
+
+export interface ResetResult {
+  dryRun: boolean;
+  epochClosed: number;
+  epochOpened: number;
+  positionsClosed: number;
+  predictionsArchived: number;
+  /** What the retired epoch finished at — preserved, never zeroed away. */
+  closing: { realizedPnl: number; wins: number; losses: number; equity: number };
+  unpriced: string[];
+}
+
+/**
+ * RESET THE PAPER PORTFOLIO — close the current epoch, open the next.
+ *
+ * Deletes nothing. Every prediction stays on disk, still resolved, still
+ * queryable; it simply belongs to a numbered era the current calibration no
+ * longer scores. The closing numbers are written to portfolio_resets so the
+ * cost of the retired epoch remains a statable fact — the public dispatch
+ * promises "losses included, by design", and a reset that quietly restored a
+ * 0W/0L header at $100,000 would turn that promise into a lie.
+ *
+ * `dryRun` defaults to TRUE: this moves money and retires a track record, so
+ * the safe mode is the one you get by forgetting the argument.
+ */
+export async function resetPaperPortfolio(
+  userId: string,
+  opts: { dryRun?: boolean; reason: string; sb?: SB },
+): Promise<ResetResult> {
+  const dryRun = opts.dryRun !== false;
+  const sb = opts.sb ?? (await getServerSupabase());
+
+  const { data: state } = await sb
+    .from('portfolio_state')
+    .select('cash, starting_capital, realized_pnl, wins, losses, ledger_epoch')
+    .eq('user_id', userId)
+    .single();
+  const epochClosed = Number(state?.ledger_epoch ?? 1);
+  const startCap = Number(state?.starting_capital ?? STARTING_CAPITAL);
+
+  const { data: openRows } = await sb
+    .from('portfolio_positions')
+    .select('id, prediction_id, ticker, direction, allocation, entry_price')
+    .eq('user_id', userId)
+    .eq('status', 'open');
+  const positions = openRows ?? [];
+
+  const { count: archived } = await sb
+    .from('predictions')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .eq('ledger_epoch', epochClosed)
+    .eq('status', 'resolved');
+
+  // Mark every open position to market so the retired epoch's final equity is
+  // the real one, not the entry-price fiction.
+  const quotes = positions.length ? await getQuotes([...new Set(positions.map((p) => String(p.ticker)))], true) : {};
+  const unpriced: string[] = [];
+  let markToMarket = 0;
+  let freed = 0;
+  for (const p of positions) {
+    const q = quotes[String(p.ticker)];
+    if (!q) { unpriced.push(String(p.ticker)); continue; }
+    const { pnl } = pnlFor(String(p.direction), Number(p.entry_price), q.current, Number(p.allocation));
+    markToMarket += pnl;
+    freed += Number(p.allocation) || 0;
+  }
+
+  const closing = {
+    realizedPnl: round2(Number(state?.realized_pnl ?? 0) + markToMarket),
+    wins: Number(state?.wins ?? 0),
+    losses: Number(state?.losses ?? 0),
+    equity: round2(Number(state?.cash ?? 0) + freed + markToMarket),
+  };
+
+  const result: ResetResult = {
+    dryRun,
+    epochClosed,
+    epochOpened: epochClosed + 1,
+    positionsClosed: positions.length - unpriced.length,
+    predictionsArchived: archived ?? 0,
+    closing,
+    unpriced,
+  };
+  if (dryRun) return result;
+
+  const now = new Date().toISOString();
+  for (const p of positions) {
+    const q = quotes[String(p.ticker)];
+    if (!q) continue;
+    const { pnl } = pnlFor(String(p.direction), Number(p.entry_price), q.current, Number(p.allocation));
+    await sb.from('portfolio_positions')
+      .update({ status: 'closed', exit_price: q.current, exit_at: now, pnl })
+      .eq('id', p.id);
+    if (p.prediction_id) {
+      // 'cancelled', never 'resolved': a position closed by a reset was never
+      // given the chance to be right or wrong, and grading it would push
+      // exactly the noise this reset exists to clear back into the ledger.
+      await sb.from('predictions')
+        .update({ status: 'cancelled', actual_price: q.current, checked_at: now })
+        .eq('id', p.prediction_id);
+    }
+  }
+
+  // The audit row goes in BEFORE the state is zeroed, so a failure between the
+  // two leaves the evidence rather than losing it.
+  await sb.from('portfolio_resets').insert({
+    user_id: userId,
+    epoch_closed: epochClosed,
+    epoch_opened: epochClosed + 1,
+    reason: opts.reason,
+    positions_closed: result.positionsClosed,
+    predictions_archived: result.predictionsArchived,
+    realized_pnl: closing.realizedPnl,
+    wins: closing.wins,
+    losses: closing.losses,
+    final_equity: closing.equity,
+  });
+
+  await sb.from('portfolio_state').update({
+    cash: startCap,
+    realized_pnl: 0,
+    wins: 0,
+    losses: 0,
+    open_positions: 0,
+    ledger_epoch: epochClosed + 1,
+    updated_at: now,
+  }).eq('user_id', userId);
+
+  return result;
+}
+
+/** Every reset this book has been through, newest first. */
+export async function getResetHistory(userId: string, sbOverride?: SB): Promise<Array<{
+  epochClosed: number; reason: string; realizedPnl: number; wins: number; losses: number;
+  finalEquity: number; positionsClosed: number; predictionsArchived: number; createdAt: string;
+}>> {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const sb = sbOverride ?? (await getServerSupabase());
+    const { data } = await sb.from('portfolio_resets')
+      .select('epoch_closed, reason, realized_pnl, wins, losses, final_equity, positions_closed, predictions_archived, created_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    return (data ?? []).map((r) => ({
+      epochClosed: Number(r.epoch_closed),
+      reason: String(r.reason),
+      realizedPnl: Number(r.realized_pnl),
+      wins: Number(r.wins),
+      losses: Number(r.losses),
+      finalEquity: Number(r.final_equity),
+      positionsClosed: Number(r.positions_closed),
+      predictionsArchived: Number(r.predictions_archived),
+      createdAt: String(r.created_at),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export interface PortfolioSnapshot {
   startingCapital: number;

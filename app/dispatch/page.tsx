@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { getFounderUserId } from '@/lib/db/founder';
 import { getAdminSupabase, isAdminConfigured } from '@/lib/db/supabase-admin';
-import { getPortfolioSnapshot, getCalibrationReport } from '@/lib/markets/portfolio';
+import { getPortfolioSnapshot, getCalibrationReport, getResetHistory } from '@/lib/markets/portfolio';
 import { buildPublicRecord, type PublicRecord } from '@/lib/jobs/dispatch';
 
 // Public, traffic-attracting page: cache it with ISR so admin + live-quote reads
@@ -38,13 +38,26 @@ export default async function DispatchPage() {
     const userId = await getFounderUserId();
     if (userId) {
       const sb = getAdminSupabase();
-      const [snap, cal, lastRun] = await Promise.all([
+      const [snap, cal, lastRun, resets] = await Promise.all([
         getPortfolioSnapshot(userId, sb),
         getCalibrationReport(userId, sb),
         sb.from('runs').select('problem').eq('user_id', userId).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+        getResetHistory(userId, sb),
       ]);
       latestCall = lastRun.data?.problem ?? undefined;
-      record = buildPublicRecord({ snapshot: snap, calibration: cal, generatedAt: new Date().toISOString(), latestCall });
+      record = buildPublicRecord({
+        snapshot: snap,
+        calibration: cal,
+        generatedAt: new Date().toISOString(),
+        latestCall,
+        // Retired epochs are shown on the PUBLIC page too. A reset must never
+        // read as a company that has never lost.
+        priorEpochs: resets.map((r) => ({
+          epoch: r.epochClosed, reason: r.reason, realizedPnl: r.realizedPnl,
+          wins: r.wins, losses: r.losses, finalEquity: r.finalEquity,
+          startingCapital: snap?.startingCapital ?? 100_000, closedAt: r.createdAt,
+        })),
+      });
     }
   }
 

@@ -6,7 +6,7 @@
 // it is honest by construction — losses get the same ink as wins, and the bulletin
 // is composed deterministically from real numbers with no LLM in the loop.
 
-import { test } from 'node:test';
+import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildPublicRecord, composeDispatch } from '../dispatch.ts';
@@ -86,4 +86,72 @@ test('composeDispatch: a kill verdict is surfaced, not buried', () => {
   const rec = buildPublicRecord({ snapshot: snapshot(), calibration: computeCalibration(rows), generatedAt: AT });
   const out = composeDispatch(rec);
   assert.match(out, /KILL|does NOT predict/);
+});
+
+// ── RESET HONESTY ───────────────────────────────────────────────────────
+// A reset restores the headline to $100,000 / 0W / 0L. This page opens by
+// promising "Losses included, by design", so a reset that showed nothing else
+// would turn that promise into a lie. These tests pin the one thing that keeps
+// it true: retired epochs are printed, high up, unprompted.
+describe('composeDispatch — a reset cannot launder the record', () => {
+  const epoch1 = {
+    epoch: 1,
+    reason: 'execution defect: positions were opened without a conflict guard',
+    realizedPnl: -2388.75,
+    wins: 6,
+    losses: 11,
+    finalEquity: 95_097,
+    startingCapital: 100_000,
+    closedAt: '2026-08-13T14:00:00Z',
+  };
+
+  function freshRecord(priorEpochs: typeof epoch1[]) {
+    return buildPublicRecord({
+      snapshot: {
+        startingCapital: 100_000, cash: 100_000, realizedPnl: 0, wins: 0, losses: 0,
+        totalValue: 100_000, openPositions: [], resolved: [],
+      } as never,
+      calibration: computeCalibration([]),
+      generatedAt: '2026-08-13T15:00:00Z',
+      priorEpochs,
+    });
+  }
+
+  it('says plainly that this is not the first ledger', () => {
+    const md = composeDispatch(freshRecord([epoch1]));
+    assert.match(md, /This is not the first ledger/);
+    assert.match(md, /retired, not deleted/);
+  });
+
+  it('states what the retired epoch actually cost, in money and in record', () => {
+    const md = composeDispatch(freshRecord([epoch1]));
+    assert.match(md, /Epoch 1 closed 2026-08-13/);
+    assert.match(md, /\$95,097/);
+    assert.match(md, /-4\.90%/);
+    assert.match(md, /6W \/ 11L/);
+    assert.match(md, /35%/);
+  });
+
+  it('carries the stated reason — a retired epoch without one reads as a hidden one', () => {
+    assert.match(composeDispatch(freshRecord([epoch1])), /without a conflict guard/);
+  });
+
+  it('prints the retired epoch ABOVE the calibration verdict, not buried below it', () => {
+    const md = composeDispatch(freshRecord([epoch1]));
+    assert.ok(md.indexOf('not the first ledger') < md.indexOf('**Calibration:**'));
+  });
+
+  it('stays silent when there is nothing retired — no reset, no notice', () => {
+    const md = composeDispatch(freshRecord([]));
+    assert.ok(!md.includes('not the first ledger'));
+  });
+
+  it('lists every retired epoch, not just the most recent', () => {
+    const md = composeDispatch(freshRecord([
+      { ...epoch1, epoch: 2, closedAt: '2026-09-01T00:00:00Z', reason: 'second reset' },
+      epoch1,
+    ]));
+    assert.match(md, /Epoch 2 closed 2026-09-01/);
+    assert.match(md, /Epoch 1 closed 2026-08-13/);
+  });
 });

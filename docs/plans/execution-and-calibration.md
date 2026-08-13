@@ -156,3 +156,21 @@ the same record.
 | Guarded run `df3af48c` | 22/22 agent calls ok, $1.71, 0 failures |
 | Book after that run | **1 position (VST long $6,600), one per ticker, nothing over cap, cash $93,400** |
 | Confidence provenance | recorded `stated=true` at 0.55 — a real conviction, not the old 0.6 placeholder |
+
+## 11. One scare, checked rather than assumed
+
+The second guarded run (`d4ec61bc`, 23/23 calls, $1.25, 0 errors) recorded **zero
+predictions**, where the run before it recorded one. Since the extractor prompt
+had been changed the same day, that needed ruling out rather than explaining away.
+
+Replaying the real stored answer through both the old and the new prompt, twice
+each: **both extract 3 picks.** All three come back `direction: "hold"` — the
+team's conclusion was "hold existing exposure within the sector cap, do not add"
+— and `extractPredictions` has always dropped `hold`, because a hold is not a
+checkable directional call. Zero predictions was the correct outcome: the company
+took no new position that day.
+
+The new prompt also did precisely what it was written for. Where the old one
+invented `confidence: 0.45` for a view the answer never quantified, the new one
+omitted the field — so the row would be stored as `confidence_stated = false`
+rather than entering the ledger disguised as a conviction.

@@ -270,3 +270,17 @@ only active goals) while the cooldown sees a closure dated now.
 - **Two orchestrators.** Fourth feature to pay the duplication tax.
 - **`portfolio_credit` / `portfolio_debit`** remain `SECURITY DEFINER` and
   `anon`-executable. Pre-existing, untouched here, worth a dedicated look.
+
+## 16. Live confirmation (2026-08-13)
+
+The loop closed on real production data, unprompted by any fixture:
+
+1. The daily pass **abandoned** goal 3 with its own reasoning — *"Technical Analyst weak spot data (4.4/10, relevance 3.5/10) is stale (2 recent runs); the immediate crisis is Market Researcher Lane B's collapse to 3/10 on a live reality check failure"* — and opened one replacement.
+2. `closed_at` + `closure_note` persisted onto the goal row.
+3. The closure now renders in the **TRACK RECORD** block of the compose prompt (2,693 chars total, 3 active + 1 closed).
+4. Re-proposing that exact title is refused: `cooling_off`, carrying the original reason, blocked until **2026-09-12**.
+5. Autonomous run `90c72676` completed clean on the new prompt: **24/24 calls ok, $1.49**, CoS compose reading **3,729 tokens from cache** — the memory rides the uncached tail exactly as designed.
+
+### An outage found along the way
+
+Four autonomous runs failed earlier the same day (09:03–12:32 UTC), every model call rejected in <250 ms with zero successes — an Anthropic credit exhaustion, entirely before this deploy. Diagnosing it required probing the API by hand, because `agent_calls` stores `ok: false` with no reason and every caller of `callModel` catches into a constant. `describeModelError()` now extracts status + error type + message, logs it at the chokepoint, and threads it into the cron response; the digest also warns when it falls back to the deterministic summary, since that fallback is otherwise indistinguishable from a real digest in the UI.

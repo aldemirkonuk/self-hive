@@ -116,3 +116,43 @@ stated**, not because anything was hidden.
 - Two orchestrators, still.
 - `portfolio_credit` / `portfolio_debit` remain `SECURITY DEFINER` and
   `anon`-executable. Pre-existing, untouched.
+
+## 9. Two more defects found while verifying
+
+Both were caught by inspection rather than by a failing run, which is worth
+recording — neither would have thrown.
+
+**The reset audit row could never have been written from the API.**
+`portfolio_resets` carries an owner-SELECT policy and deliberately no INSERT
+policy, so the audit row cannot be forged by anything holding a browser session.
+But `/api/portfolio/reset` passed its *session* client into
+`resetPaperPortfolio`, so that INSERT would have been silently rejected by RLS:
+positions closed, epoch rolled, portfolio zeroed to $100,000, and no record
+anywhere that an epoch had ever been retired. The laundering the design forbids,
+arriving through the back door. The live reset only succeeded because it ran with
+the service-role client from a script.
+
+Fixed by authenticating with the session client and doing the work with the admin
+one, and by making `resetPaperPortfolio` **throw** if the audit row cannot be
+written rather than proceeding to zero the state.
+
+**The public page rendered its own JSX and never read `priorEpochs`.** The
+retired-epoch banner was wired into `composeDispatch` (the markdown heartbeat)
+and into `buildPublicRecord`, but `/dispatch` builds its own layout — so the
+world-facing page showed +$0 / 0W / 0L with no notice, while also listing epoch-1
+losses under that header. Caught only by loading the deployed page.
+
+Lesson for this codebase: "the dispatch" is **two** surfaces — the markdown the
+heartbeat emits and `app/dispatch/page.tsx` — and they render independently from
+the same record.
+
+## 10. Live verification, end to end
+
+| Check | Result |
+|---|---|
+| Reset executed | epoch 1 closed at $95,118.21 (−4.88%), 6W/11L · 15 positions closed · 40 predictions archived and verified present |
+| Public page after reset | retired-epoch banner renders above the tiles with the stated reason; RECENTLY SETTLED correctly empty for epoch 2 |
+| Prediction state | epoch 1: 15 cancelled + 40 resolved, **zero orphan open rows**; epoch 2 clean |
+| Guarded run `df3af48c` | 22/22 agent calls ok, $1.71, 0 failures |
+| Book after that run | **1 position (VST long $6,600), one per ticker, nothing over cap, cash $93,400** |
+| Confidence provenance | recorded `stated=true` at 0.55 — a real conviction, not the old 0.6 placeholder |

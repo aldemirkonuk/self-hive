@@ -202,3 +202,71 @@ Executing this plan required first repairing the live database. Every item below
 - **Register the workflow.** `.github/workflows/daily-digest.yml` needs `SELFHIVE_PROD_URL` (repo variable) and `CRON_SECRET` (repo secret) before it fires. The existing `autonomous.yml` already uses both.
 - **Structured `target_metric`.** The goals the hive set have genuinely checkable targets ("Financial Advisor trainer avg >= 6.5/10 over next 5 runs") but nothing closes them automatically yet — the daily pass still asks the model.
 - **Two orchestrators.** T5 and T7 each had to be applied twice. Third feature running this tax.
+
+---
+
+# Phase 1.2 — Institutional memory (goal ledger)
+
+Phase 1.1 gave the hive an agenda that spans runs. It did not give it a *memory*
+of that agenda, and the difference turns out to be the whole thing.
+
+## 12. What was actually broken
+
+Five defects, all in code shipped by Phase 1.1, all found by reading it back
+against the question "would an employee behave like this?".
+
+| # | Defect | Why it mattered |
+|---|---|---|
+| 1 | `formatGoalsForCoS()` filtered to `status === 'active'`. | A closed goal vanished from the Chief of Staff's prompt completely. Achieved or abandoned, it left no trace — the hive could not tell you what it had ever worked on. |
+| 2 | `closeGoal()` wrote the *reason* only into `change_requests`. | The lesson existed, but in a table no agent ever reads. Nothing could be fed forward even if #1 were fixed. |
+| 3 | `isDuplicateGoal()` also filtered to active. | **The loop.** `scoutGaps()` recomputes weak spots from scratch daily, so a gap the hive judged and abandoned on Monday reappears identically on Tuesday. With no memory of the closure, the model makes the identical proposal — forever. |
+| 4 | `CreateGoalArgs.createdBy` excludes `'founder'` by type. | The `created_by='founder'` value has been in the schema since 0013 with **no way for the app to write it**. Directives could only be inserted by hand-run SQL. |
+| 5 | `openSlots()` counted founder goals against `MAX_ACTIVE_GOALS`. | Latent until #4 was fixed, then immediately harmful: three directives would fill every slot and permanently switch off the hive's own goal-setting. |
+
+## 13. What was built
+
+- **Migration `0015_goal_memory`** — `closed_at`, `closure_note`, a partial index
+  on closures, and a backfill of `closed_at` from `updated_at` so historical rows
+  cool off correctly instead of appearing to have been closed at the epoch.
+- **The ledger** (`loadGoalLedger`) replaces `loadActiveGoals` at both compose
+  sites. Active goals + the 50 most recent closures, unfiltered by age — the pure
+  core decides what is still cooling off and what reaches the prompt, and it can
+  only decide either if it can see them.
+- **TRACK RECORD block** — closed goals reach the CoS with their lesson and an
+  explicit reading (`ACHIEVED` = a capability you now have; `ABANDONED` = a road
+  already walked). Bounded to `MAX_REMEMBERED_CLOSURES = 5`.
+- **Reopen cooldowns**, split by what the status *means*: `abandoned` is a
+  judgement (30d), `achieved` is a result and results regress (14d).
+- **Founder directives** get their own budget (`MAX_FOUNDER_DIRECTIVES = 3`),
+  a session-authenticated route, and a composer on `/reports`. `createGoal` still
+  excludes `'founder'` by type, so nothing inside a run can forge one.
+- **Refusals are reported, never silent** — `selectGoalActions` returns
+  `rejected[]` with a reason and the original closure note, surfaced in the cron
+  response and the server log.
+
+### The bug the tests caught
+
+The first implementation of `selectGoalActions` filtered just-closed goals *out*
+of `survivors`. That handed the model a loophole it would eventually find on its
+own: close a goal to free a slot, then spend that slot re-opening the same goal,
+because nothing left in scope remembered it. Fixed by rewriting the status in
+place rather than dropping the row — the freed slot is real (`openSlots` counts
+only active goals) while the cooldown sees a closure dated now.
+
+## 14. Verified
+
+- 267 unit tests (up from 239); 45 of them cover this phase.
+- 23 live checks against production Supabase (`verify-memory.ts`): the founder
+  directive path, closure persistence, the track record reaching a real compose
+  prompt (2,687 chars ≈ 726 tokens), and the refusal firing at *both* the pure
+  layer and the store.
+- Supabase advisors: no new findings at any level.
+
+## 15. Still open
+
+- **Structured `target_metric`** (carried from §11) — goals still close on a
+  model's judgement, not on evidence. This phase makes that gap cheaper to live
+  with, not smaller.
+- **Two orchestrators.** Fourth feature to pay the duplication tax.
+- **`portfolio_credit` / `portfolio_debit`** remain `SECURITY DEFINER` and
+  `anon`-executable. Pre-existing, untouched here, worth a dedicated look.

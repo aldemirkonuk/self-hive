@@ -29,6 +29,7 @@ import { loadFounderManifest, loadCanonFor } from './canon-loader';
 import { SELFHIVE_DOCTRINE } from './doctrine';
 import { DynamicRunEvent, AgentRole } from './types';
 import { ResourceBundle, effectFor } from './resources/runtime';
+import { loadCalibrationBlock } from './markets/portfolio';
 
 const DISCLAIMER = 'SELFHIVE does not provide investment advice or stock recommendations.';
 
@@ -208,7 +209,10 @@ export async function* runDynamicTeam(
     // THE GOAL LEDGER — the hive's cross-run agenda AND its memory of the goals
     // it already closed, on every compose.
     const goalsBlock = formatGoalsForCoS(await loadGoalLedger(userId));
-    const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
+    // CALIBRATION — the exogenous grade on the company's stated confidence,
+    // fed back to the agents that produce the next prediction.
+    const calibrationBlock = await loadCalibrationBlock(userId);
+    const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock, calibrationBlock);
     const cos = await callModel(
       { runId, userId, role: 'chief_of_staff', phase: 'compose' },
       {

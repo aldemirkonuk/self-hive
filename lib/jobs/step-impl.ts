@@ -47,7 +47,7 @@ import { ResourceBundle, effectFor } from '../resources/runtime';
 import { parseDynamicTrainerScores } from '../trainer/parse';
 import { recordSpawnedWorkforce } from '../workforce';
 import { extractPredictions } from '../markets/predictions';
-import { recordAndAllocate } from '../markets/portfolio';
+import { loadCalibrationBlock, recordAndAllocate } from '../markets/portfolio';
 import { extractClaims } from '../claims/extract';
 import { recordClaims } from '../claims/store';
 import { isMarketsRun } from '../markets/util';
@@ -153,7 +153,12 @@ export async function composeImpl(
   // it already closed, injected on EVERY compose so both steer team composition
   // (and flow downstream through task contracts).
   const goalsBlock = formatGoalsForCoS(await loadGoalLedger(userId));
-  const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock);
+  // CALIBRATION — the exogenous grade on the company's stated confidence. This
+  // was computed and then shown only to the founder; it now reaches the agents
+  // that produce the next prediction, which is the only place it can change
+  // anything.
+  const calibrationBlock = await loadCalibrationBlock(userId, getAdminSupabase());
+  const cosPrompt = chiefOfStaffSystemPrompt(customDescs, trainerHistory, reputationBlock, recallBlock, goalsBlock, calibrationBlock);
   const cos = await callModel(
     { userId, runId, role: 'chief_of_staff', phase: 'compose' },
     {

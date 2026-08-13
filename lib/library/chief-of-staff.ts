@@ -73,6 +73,7 @@ export function chiefOfStaffSystemPrompt(
   reputationBlock = '', // HIVE ECONOMY: earned per-role standing (see lib/library/reputation.ts)
   recallBlock = '', // HIVE MIND: past episodes most like this problem, illuminated (see lib/library/recall.ts)
   goalsBlock = '', // STANDING GOALS: the hive's cross-run agenda (see lib/goals/core.ts)
+  calibrationBlock = '', // CALIBRATION: how its stated confidence actually performed (see lib/markets/calibration.ts)
 ): CoSPrompt {
   const libDesc = LIBRARY_IDS.map((id) => {
     const s = LIBRARY[id];
@@ -94,9 +95,15 @@ export function chiefOfStaffSystemPrompt(
 
   // The hive's memory for THIS run, ordered least- to most-volatile so the
   // cache breakpoint above it stays valid for as long as possible.
+  // `calibrationBlock` sits with the goals: it changes at most once per outcome
+  // check (daily-ish), so it belongs at the low-volatility end of the tail.
   const volatile =
-    goalsBlock || trainerBlock || reputationBlock || recallBlock
-      ? `\n\n=== THE HIVE'S MEMORY (read this before you compose) ===${goalsBlock}${trainerBlock}${reputationBlock}${recallBlock}\n=== END MEMORY ===\n\nNow compose the team, honoring both the RULES above and the memory here.`
+    goalsBlock || calibrationBlock || trainerBlock || reputationBlock || recallBlock
+      ? `\n\n=== THE HIVE'S MEMORY (read this before you compose) ===${goalsBlock}${calibrationBlock}${trainerBlock}${reputationBlock}${recallBlock}\n=== END MEMORY ===\n\nNow compose the team, honoring both the RULES above and the memory here.${
+          calibrationBlock
+            ? ` When this problem calls for a view the company will be graded on, write the calibration discipline above into the relevant agents' task contracts — it is not enough for you to have read it.`
+            : ''
+        }`
       : '';
 
   const stable = `You are the CHIEF OF STAFF of SELFHIVE — a self-improving autonomous company owned by the founder (Aldemir).

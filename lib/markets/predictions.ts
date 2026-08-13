@@ -6,7 +6,20 @@ export interface RawPick {
   horizonDays: number;
   confidence: number; // 0-1
   thesis: string;
+  /**
+   * Did the ANSWER state this conviction, or did the extractor supply a default?
+   *
+   * Calibration asks whether the confidence the company stated predicted the
+   * outcome. A number nobody stated cannot answer that question — but it used
+   * to be written into `predictions.confidence` and graded exactly as if a
+   * analyst had committed to it. Recording the provenance lets the ledger tell
+   * a conviction from a placeholder.
+   */
+  confidenceStated: boolean;
 }
+
+/** What the extractor assumes when an answer states no conviction at all. */
+export const DEFAULT_CONFIDENCE = 0.6;
 
 /**
  * Extract structured, checkable picks from a markets answer. Uses Haiku (cheap)
@@ -28,7 +41,7 @@ Rules:
 - Only include positions with a REAL, specific ticker symbol (NASDAQ/NYSE). Skip vague mentions.
 - "long" = expects up, "short" = expects down, "hold" = explicitly neutral (rare; usually skip).
 - horizonDays: infer from the answer (default 30 if unstated).
-- confidence: infer from the answer's stated conviction (default 0.6).
+- confidence: ONLY the conviction the answer actually expresses. If the answer states a probability or an explicit strength ("high conviction", "tentative"), map it. If it expresses no conviction at all, OMIT the field entirely — do not guess a number. An invented confidence is later graded against real prices as though an analyst had committed to it, so a guess here becomes a permanent false entry in the company's record.
 - If there are no concrete tickered positions, return [].`;
 
   try {
@@ -60,13 +73,17 @@ Rules:
       // ME-08: require a real symbol (leading letter, optional .XX suffix) — no bare dots.
       .filter((p) => p && typeof p.ticker === 'string' && /^[A-Z]{1,5}(\.[A-Z]{1,2})?$/.test(p.ticker.toUpperCase()))
       .filter((p) => p.direction !== 'hold')
-      .map((p) => ({
-        ticker: String(p.ticker).toUpperCase(),
-        direction: (p.direction === 'short' ? 'short' : 'long') as 'long' | 'short',
-        horizonDays: Number.isFinite(p.horizonDays) ? Math.max(1, Math.min(365, Math.round(p.horizonDays))) : 30,
-        confidence: Number.isFinite(p.confidence) ? Math.max(0.1, Math.min(1, p.confidence)) : 0.6,
-        thesis: typeof p.thesis === 'string' ? p.thesis.slice(0, 300) : '',
-      }))
+      .map((p) => {
+        const stated = Number.isFinite(p.confidence);
+        return {
+          ticker: String(p.ticker).toUpperCase(),
+          direction: (p.direction === 'short' ? 'short' : 'long') as 'long' | 'short',
+          horizonDays: Number.isFinite(p.horizonDays) ? Math.max(1, Math.min(365, Math.round(p.horizonDays))) : 30,
+          confidence: stated ? Math.max(0.1, Math.min(1, p.confidence)) : DEFAULT_CONFIDENCE,
+          confidenceStated: stated,
+          thesis: typeof p.thesis === 'string' ? p.thesis.slice(0, 300) : '',
+        };
+      })
       .slice(0, 10); // cap positions per run
   } catch (e) {
     if (e instanceof AIDisabledError) return [];

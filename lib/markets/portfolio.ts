@@ -2,10 +2,33 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { getServerSupabase, isSupabaseConfigured } from '../db/supabase-server';
 import { getQuote, getQuotes } from './oracle';
 import { RawPick } from './predictions';
-import { computeCalibration, type CalibrationReport, type ResolvedPrediction } from './calibration';
+import {
+  computeCalibration,
+  formatCalibrationForAgents,
+  type CalibrationReport,
+  type ResolvedPrediction,
+} from './calibration';
+import {
+  formatRejections,
+  planReconciliation,
+  screenPicks,
+  type BookPosition,
+  type ReconcileAction,
+  type RejectedPick,
+} from './conflicts';
 
 const STARTING_CAPITAL = 100_000;
-const MAX_POSITION_FRACTION = 0.12; // max 12% of starting capital per position
+/**
+ * Max exposure to any ONE TICKER, as a fraction of starting capital.
+ *
+ * This used to be enforced per PICK, which made it meaningless: three separate
+ * short calls on XLE each passed the 12% test individually and together held
+ * 19.8% of capital. The cap is now applied to a ticker's TOTAL exposure,
+ * counting positions already on the book — see screenPicks().
+ */
+const MAX_POSITION_FRACTION = 0.12;
+/** Below this, a position isn't worth the row it's stored in. */
+const MIN_ALLOCATION = 100;
 
 // Accept either the cookie-scoped server client or the service-role admin client
 // (both are SupabaseClient) — LO-05: real type instead of `as any` at the boundary.
@@ -32,8 +55,8 @@ export async function recordAndAllocate(
   runId: string,
   picks: RawPick[],
   sbOverride?: SB
-): Promise<{ allocated: number; positions: number }> {
-  if (!isSupabaseConfigured() || picks.length === 0) return { allocated: 0, positions: 0 };
+): Promise<{ allocated: number; positions: number; rejected: RejectedPick[] }> {
+  if (!isSupabaseConfigured() || picks.length === 0) return { allocated: 0, positions: 0, rejected: [] };
   const sb = sbOverride ?? (await getServerSupabase());
   await ensurePortfolio(sb, userId);
 
@@ -42,28 +65,46 @@ export async function recordAndAllocate(
     .select('cash, starting_capital')
     .eq('user_id', userId)
     .single();
-  if (!state) return { allocated: 0, positions: 0 };
+  if (!state) return { allocated: 0, positions: 0, rejected: [] };
+
+  // THE OPEN BOOK. Screening needs to know what the hive already holds — every
+  // contradictory pair and redundant stack in the portfolio got there because
+  // this read did not exist and each pick was judged in isolation.
+  const { data: openRows } = await sb
+    .from('portfolio_positions')
+    .select('ticker, direction, allocation')
+    .eq('user_id', userId)
+    .eq('status', 'open');
 
   const startCap = Number(state.starting_capital);
-  let availableEstimate = Number(state.cash); // for sizing only; debit is atomic
-  const cap = startCap * MAX_POSITION_FRACTION;
+  const { accept, reject } = screenPicks(picks, (openRows ?? []).map((r) => ({
+    ticker: String(r.ticker),
+    direction: String(r.direction),
+    allocation: Number(r.allocation) || 0,
+  })), {
+    startCapital: startCap,
+    cash: Number(state.cash),
+    maxTickerFraction: MAX_POSITION_FRACTION,
+    minAllocation: MIN_ALLOCATION,
+  });
+
+  // Never silent. A refused trade is a decision, and the reasons are the most
+  // useful thing this function produces on a bad day.
+  for (const line of formatRejections(reject)) console.warn(`[selfhive] position refused · ${line}`);
+
   let allocatedTotal = 0;
   let count = 0;
 
-  for (const pick of picks) {
+  for (const { pick, allocation: sized } of accept) {
     const quote = await getQuote(pick.ticker);
     if (!quote) continue; // skip unverifiable tickers
     const entry = quote.current;
 
-    const desired = Math.round(startCap * MAX_POSITION_FRACTION * pick.confidence);
-    const allocation = Math.min(desired, cap, availableEstimate);
-    if (allocation < 100) continue;
-
     // CR-03: atomic debit — a single guarded UPDATE. Two concurrent runs can't
     // overspend; if funds are gone, this returns null and we skip the pick.
+    const allocation = sized;
     const { data: newCash, error } = await sb.rpc('portfolio_debit', { p_user_id: userId, p_amount: allocation });
     if (error || newCash === null || newCash === undefined) continue;
-    availableEstimate = Number(newCash);
 
     const checkAt = new Date(Date.now() + pick.horizonDays * 86400_000).toISOString();
     const { data: pred } = await sb
@@ -72,6 +113,7 @@ export async function recordAndAllocate(
         user_id: userId, run_id: runId, domain: 'markets',
         ticker: pick.ticker, direction: pick.direction, thesis: pick.thesis,
         entry_price: entry, horizon_days: pick.horizonDays, confidence: pick.confidence,
+        confidence_stated: pick.confidenceStated !== false,
         check_at: checkAt, status: 'open',
       })
       .select('id')
@@ -100,7 +142,7 @@ export async function recordAndAllocate(
       .eq('user_id', userId);
   }
 
-  return { allocated: allocatedTotal, positions: count };
+  return { allocated: allocatedTotal, positions: count, rejected: reject };
 }
 
 function pnlFor(direction: string, entry: number, current: number, allocation: number) {
@@ -236,9 +278,11 @@ export async function getResolvedPredictionRows(userId: string, sbOverride?: SB)
   if (!isSupabaseConfigured()) return [];
   const sb = sbOverride ?? (await getServerSupabase());
 
+  // ticker + direction are carried so measureContamination() can tell an
+  // independent bet from the same bet counted three times.
   const { data } = await sb
     .from('predictions')
-    .select('confidence, outcome_correct, outcome_pct')
+    .select('confidence, outcome_correct, outcome_pct, ticker, direction')
     .eq('user_id', userId)
     .eq('status', 'resolved')
     .not('confidence', 'is', null)
@@ -250,11 +294,153 @@ export async function getResolvedPredictionRows(userId: string, sbOverride?: SB)
       confidence: Number(r.confidence),
       correct: Boolean(r.outcome_correct),
       outcomePct: Number(r.outcome_pct ?? 0),
+      ticker: r.ticker ? String(r.ticker) : undefined,
+      direction: r.direction ? String(r.direction) : undefined,
     }));
 }
 
 export async function getCalibrationReport(userId: string, sbOverride?: SB): Promise<CalibrationReport> {
   return computeCalibration(await getResolvedPredictionRows(userId, sbOverride));
+}
+
+export interface ReconcileResult {
+  dryRun: boolean;
+  /** What the plan would do / did, one entry per position. */
+  actions: Array<{ ticker: string; direction: string; allocation: number; reason: string; detail: string; pnl: number }>;
+  /** Positions left open after reconciliation — one per ticker. */
+  kept: number;
+  closed: number;
+  realizedPnl: number;
+  freedCapital: number;
+  /** Positions the plan wanted to close but could not price. */
+  unpriced: string[];
+}
+
+/**
+ * RECONCILE THE BOOK — collapse it to one position per ticker.
+ *
+ * `dryRun` defaults to TRUE. This function realizes P&L and moves cash, so the
+ * safe mode is the one you get by forgetting the argument.
+ *
+ * Forced closures are marked `status='cancelled'`, NOT `'resolved'`. That
+ * distinction is the point: a position closed early because the book was
+ * incoherent never got the chance to be right or wrong, and grading it would
+ * push exactly the manufactured noise this work exists to remove back into the
+ * calibration ledger, which reads only resolved rows.
+ */
+export async function reconcileConflicts(
+  userId: string,
+  opts: { dryRun?: boolean; sb?: SB } = {},
+): Promise<ReconcileResult> {
+  const dryRun = opts.dryRun !== false;
+  const empty: ReconcileResult = { dryRun, actions: [], kept: 0, closed: 0, realizedPnl: 0, freedCapital: 0, unpriced: [] };
+  if (!isSupabaseConfigured()) return empty;
+  const sb = opts.sb ?? (await getServerSupabase());
+
+  const { data: rows } = await sb
+    .from('portfolio_positions')
+    .select('id, prediction_id, ticker, direction, allocation, entry_price')
+    .eq('user_id', userId)
+    .eq('status', 'open');
+  if (!rows || rows.length === 0) return empty;
+
+  const entryById = new Map<string, number>();
+  const book: BookPosition[] = rows.map((r) => {
+    entryById.set(String(r.id), Number(r.entry_price));
+    return {
+      id: String(r.id),
+      predictionId: r.prediction_id ? String(r.prediction_id) : null,
+      ticker: String(r.ticker),
+      direction: String(r.direction),
+      allocation: Number(r.allocation) || 0,
+    };
+  });
+
+  const plan = planReconciliation(book);
+  if (plan.close.length === 0) return { ...empty, kept: plan.keep.length };
+
+  const quotes = await getQuotes([...new Set(plan.close.map((a) => a.position.ticker))], true);
+
+  const actions: ReconcileResult['actions'] = [];
+  const unpriced: string[] = [];
+  let realizedPnl = 0;
+  let freedCapital = 0;
+  let closed = 0;
+
+  for (const action of plan.close) {
+    const pos = action.position;
+    const quote = quotes[pos.ticker];
+    if (!quote) { unpriced.push(pos.ticker); continue; }
+    const { pnl } = pnlFor(pos.direction, entryById.get(pos.id) ?? 0, quote.current, pos.allocation);
+
+    actions.push({
+      ticker: pos.ticker, direction: pos.direction, allocation: pos.allocation,
+      reason: action.reason, detail: action.detail, pnl: Math.round(pnl * 100) / 100,
+    });
+    realizedPnl += pnl;
+    freedCapital += pos.allocation;
+    closed++;
+
+    if (dryRun) continue;
+
+    await sb.from('portfolio_positions')
+      .update({ status: 'closed', exit_price: quote.current, exit_at: new Date().toISOString(), pnl })
+      .eq('id', pos.id);
+
+    if (pos.predictionId) {
+      // outcome_pct / outcome_correct are deliberately left NULL. The
+      // calibration ledger requires both to be non-null, so a cancelled row can
+      // never leak into it no matter how the status filter later changes.
+      const { error: predErr } = await sb.from('predictions')
+        .update({ status: 'cancelled', actual_price: quote.current, checked_at: new Date().toISOString() })
+        .eq('id', pos.predictionId);
+      if (predErr) {
+        console.warn(`[selfhive] reconcile: could not cancel prediction ${pos.predictionId} —`, predErr.message);
+      }
+    }
+  }
+
+  if (!dryRun && closed > 0) {
+    // Wins/losses stay at 0: a cancelled position is not a graded call, and
+    // counting it would corrupt the public record the same way grading it
+    // would corrupt calibration.
+    await sb.rpc('portfolio_credit', {
+      p_user_id: userId,
+      p_cash_delta: freedCapital + realizedPnl,
+      p_realized: realizedPnl,
+      p_wins: 0,
+      p_losses: 0,
+    });
+    const { count: remaining } = await sb
+      .from('portfolio_positions')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId).eq('status', 'open');
+    await sb.from('portfolio_state')
+      .update({ open_positions: remaining ?? 0, updated_at: new Date().toISOString() })
+      .eq('user_id', userId);
+  }
+
+  return {
+    dryRun, actions, kept: plan.keep.length, closed,
+    realizedPnl: Math.round(realizedPnl * 100) / 100,
+    freedCapital: Math.round(freedCapital * 100) / 100,
+    unpriced,
+  };
+}
+
+/**
+ * The calibration block for an agent prompt. Best-effort by contract: a
+ * calibration read must never be able to break a run's compose step, exactly
+ * like loadGoalLedger(). Returns '' on any failure or on a thin sample.
+ */
+export async function loadCalibrationBlock(userId: string | null, sbOverride?: SB): Promise<string> {
+  if (!userId) return '';
+  try {
+    return formatCalibrationForAgents(await getCalibrationReport(userId, sbOverride));
+  } catch (e) {
+    console.warn('[selfhive] calibration block unavailable —', e instanceof Error ? e.message : e);
+    return '';
+  }
 }
 
 export interface PortfolioSnapshot {

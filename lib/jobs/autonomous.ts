@@ -7,9 +7,13 @@ import { buildPublicRecord, composeDispatch } from './dispatch';
 import { getOverallCalibration, getClaimCoverage } from '../claims/store';
 import { getRecallBlock } from '../library/recall';
 import { runDream } from './dream';
-import { getUserSettingsAdmin } from '../db/settings';
+import { getUserSettingsAdmin, setUserSettingsAdmin } from '../db/settings';
 import { SELFHIVE_DOCTRINE } from '../doctrine';
 import { loadFounderManifest } from '../canon-loader';
+import { companyBudget, valueRun, runBudget, shouldPause, type BudgetEnvelope } from '../elastic/self-funding';
+import { readDailySpent } from '../elastic/ledger';
+import { resolveTier } from '../elastic/p1';
+import { MAX_FAILURE_STREAK, TIERS } from '../elastic/config';
 
 /**
  * The autonomous CEO. Surveys the company's state (portfolio, learned edges,
@@ -96,6 +100,65 @@ export interface AutonomousResult {
   error?: string;
 }
 
+// ─── SELF-FUNDING PRE-FLIGHT GATE ─────────────────────────────────────
+// Before a single token is spent, the CFO asks two questions: can the company
+// afford a full-quality run out of the budget it has EARNED, and is the loop
+// structurally healthy?
+//
+// Both have real history behind them. On 2026-08-13 four runs fired in sequence
+// against an exhausted API balance, every model call rejected in under 250ms,
+// because nothing checked. Through July the loop ran at 10–15% completion for
+// three straight weeks with nothing stopping it. This gate is what those two
+// episodes were missing. All reads — no LLM calls.
+interface PreflightGate {
+  envelope: BudgetEnvelope;
+  realizedPnlUsd: number;
+  pause: boolean;
+  reason?: string;
+  note: string;
+}
+
+async function preflightGate(sb: ReturnType<typeof getAdminSupabase>, userId: string): Promise<PreflightGate> {
+  // Treasury signals: realized P&L (what the company earned), lifetime compute
+  // spend, and today's spend — the three inputs to the earned budget.
+  const day = new Date().toISOString().slice(0, 10);
+  const [pnlRes, spendRes, daily] = await Promise.all([
+    sb.from('portfolio_state').select('realized_pnl').eq('user_id', userId).maybeSingle(),
+    sb.from('run_costs').select('cost_usd').eq('user_id', userId),
+    readDailySpent(sb, userId, day),
+  ]);
+  const realizedPnlUsd = Number(pnlRes.data?.realized_pnl ?? 0);
+  const computeSpentUsd = (spendRes.data ?? []).reduce((s: number, r: { cost_usd?: number | string | null }) => s + Number(r.cost_usd ?? 0), 0);
+  const envelope = companyBudget({ realizedPnlUsd, computeSpentUsd, spentTodayUsd: daily.spentUsd });
+
+  // Health: consecutive failures among the most recent runs, plus a billing
+  // signature. describeModelError() now writes the real cause into run_error,
+  // so "credit balance is too low" is finally detectable here — before this,
+  // every failure was the string "workflow failed" and none of it was legible.
+  const { data: recent } = await sb
+    .from('runs').select('id, status').eq('user_id', userId)
+    .order('created_at', { ascending: false }).limit(MAX_FAILURE_STREAK);
+  let recentFailures = 0;
+  for (const r of recent ?? []) {
+    if (r.status === 'failed') recentFailures++;
+    else break;
+  }
+
+  let billingError = false;
+  if (recentFailures > 0) {
+    const { data: errs } = await sb
+      .from('run_events').select('payload').eq('type', 'run_error')
+      .in('run_id', (recent ?? []).map((r) => r.id));
+    billingError = (errs ?? []).some((e) => {
+      const msg = JSON.stringify(e.payload ?? '').toLowerCase();
+      return msg.includes('credit') || msg.includes('billing') || msg.includes('quota') || msg.includes('insufficient');
+    });
+  }
+
+  const decision = shouldPause({ solvent: envelope.solvent, recentFailures, billingError });
+  return { envelope, realizedPnlUsd, pause: decision.pause, reason: decision.reason, note: `${envelope.note} · ${decision.note}` };
+}
+
 /**
  * One autonomous cycle: resolve reality, then generate + launch the next run.
  * Called by the daily cron. Runs entirely under the service role (no user session).
@@ -108,7 +171,18 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
 
   const sb = getAdminSupabase();
 
+  // 0. HARD-PAUSE CHECK. If a previous cycle tripped the breaker the loop stays
+  // down until the founder re-enables it — no reality check, no API calls, no
+  // exceptions. A breaker that resets itself is not a breaker.
+  const settings = await getUserSettingsAdmin(userId);
+  if (!settings.autonomousEnabled) {
+    console.warn('[autonomous] loop is PAUSED (autonomous_enabled = false) — re-enable to resume');
+    return { ok: false, mode: 'paused', error: 'autonomous loop paused — re-enable in settings to resume' };
+  }
+
   // 1. Reality check — resolve any positions past their horizon, update learning.
+  // Free (price oracle, no LLM) and it REALIZES P&L, so it runs BEFORE the budget
+  // gate: the earned budget should reflect gains banked this very cycle.
   let outcomes;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -116,6 +190,17 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
   } catch (e) {
     outcomes = { marked: 0, resolved: 0, realizedPnl: 0 };
     console.error('[autonomous] checkOutcomes failed:', e);
+  }
+
+  // 1a. SELF-FUNDING PRE-FLIGHT. With P&L freshly realized, can the company
+  // afford a full-quality run, and is the loop healthy? If not, trip the breaker
+  // and stop BEFORE any LLM spend (dream, CEO, compose).
+  const gate = await preflightGate(sb, userId);
+  console.log(`[autonomous] CFO ${gate.note}`);
+  if (gate.pause) {
+    await setUserSettingsAdmin(userId, { autonomousEnabled: false });
+    console.warn(`[autonomous] BREAKER TRIPPED (${gate.reason}) → loop paused. ${gate.note}`);
+    return { ok: false, outcomes, mode: `paused:${gate.reason}`, error: gate.note };
   }
 
   // 1b. Calibration Ledger — read the freshly-resolved record back into one number:
@@ -234,12 +319,44 @@ export async function runAutonomousCycle(): Promise<AutonomousResult> {
     console.error('[autonomous] recall failed:', e);
   }
 
+  // 2c. CFO VALUATION → PER-RUN BUDGET. Outcome-optimized and quality-first.
+  // Novelty comes from recall (a strong prior match means we largely own this
+  // answer already, so the marginal value is lower), ROI from the company's
+  // realized P&L per compute dollar, opportunity from deployable cash. Expected
+  // value buys COVERAGE above the quality floor — it can never buy less quality.
+  const { data: pstate } = await sb.from('portfolio_state').select('cash').eq('user_id', userId).maybeSingle();
+  const cash = Number(pstate?.cash ?? 0);
+  const novelty = recallBlock.trim().length > 400 ? 0.4 : 1;
+  const valuation = valueRun({ novelty, roiPrior: gate.envelope.roi, openOpportunity: cash > 1000 ? 1 : 0.3 });
+  const runBudgetUsd = runBudget(gate.envelope, valuation, TIERS[resolveTier()].capUsd);
+
+  // The one line on the wall: earned pool, spend, company ROI, what this run got.
+  // Persisted as a run event so /ledger and the dispatch can render it.
+  try {
+    const { data: seqRow } = await sb.from('run_events').select('seq').eq('run_id', runId)
+      .order('seq', { ascending: false }).limit(1);
+    const seq = ((seqRow?.[0]?.seq as number | undefined) ?? -1) + 1;
+    await sb.from('run_events').insert({
+      run_id: runId, seq, type: 'cfo_ledger',
+      payload: {
+        realizedPnlUsd: Number(gate.realizedPnlUsd.toFixed(4)),
+        poolUsd: gate.envelope.poolUsd,
+        remainingUsd: gate.envelope.remainingUsd,
+        dailyRemainingUsd: gate.envelope.dailyRemainingUsd,
+        roi: Number.isFinite(gate.envelope.roi) ? gate.envelope.roi : null,
+        runBudgetUsd,
+        note: `${gate.envelope.note} · ${valuation.note} · funded $${runBudgetUsd.toFixed(2)}`,
+      },
+    });
+  } catch { /* non-fatal — monitoring must never block a run */ }
+  console.log(`[autonomous] CFO funded run $${runBudgetUsd.toFixed(2)} · ${valuation.note}`);
+
   let mode = 'workflow';
   try {
     const { start } = await import('workflow/api');
     const { runSelfhiveWorkflow } = await import('@/app/workflows/selfhive-run');
     await start(runSelfhiveWorkflow, [
-      { runId, problem, userId, trainerHistory: '', customAgents: {}, costByClass, recallBlock },
+      { runId, problem, userId, trainerHistory: '', customAgents: {}, costByClass, recallBlock, computeBudgetUsd: runBudgetUsd },
     ]);
   } catch (e) {
     console.error('[autonomous] workflow start failed, using direct executor:', e);

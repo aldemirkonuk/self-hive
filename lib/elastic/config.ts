@@ -26,6 +26,24 @@ export const DAILY_CAP_USD = 50;
 export const MONTHLY_CAP_USD = 500;
 export const BACKPRESSURE_AT = 0.8; // tighten allocation past 80% of a cap
 
+// ─── SELF-FUNDING TREASURY ────────────────────────────────────────────
+// The company pays for its own compute out of the profit it makes. DAILY_CAP_USD
+// and MONTHLY_CAP_USD above remain as absolute ceilings — the outer fence — but
+// the budget the company may actually DRAW is earned, and scales with realized
+// P&L rather than being hand-picked.
+//
+// Doctrine: QUALITY OVER EVERYTHING. A run is funded to full quality or it does
+// not run. When the envelope cannot cover a full-quality run the CFO PAUSES; it
+// never ships a degraded result to save money.
+//
+// These rates ARE the financial policy — tune them here, nowhere else.
+export const BOOTSTRAP_BUDGET_USD = 25;    // seed compute the company may spend before it is profitable
+export const REINVEST_RATE = 0.15;         // fraction of realized profit reinvested into compute
+export const DAILY_DRAW_FRACTION = 0.25;   // max share of the remaining pool spendable in one day
+export const RUN_QUALITY_FLOOR_USD = 0.5;  // a full-quality run's floor; below this the CFO pauses, never degrades
+export const ROI_SATURATION = 5;           // company ROI (P&L ÷ compute) at/above which a run scores full value marks
+export const MAX_FAILURE_STREAK = 3;       // consecutive failed cycles → hard-pause the autonomous loop
+
 // Circuit breaker — freeze new descents when any trips.
 export const BREAKER_USD_PER_MIN = 2;
 export const BREAKER_RUN_MULT = 1.5; // run total > 1.5× the tier cap

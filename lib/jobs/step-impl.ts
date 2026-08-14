@@ -55,8 +55,8 @@ import { isMarketsRun } from '../markets/util';
 import { isElastic, resolveTier, planElasticAllocation, persistNodes, squadsByRole, readLeafOutputs, buildReduceContext, loadRoiByTitle, roiByRoleFromTitles } from '../elastic/p1';
 import { recordArtifact, settleSpend, setNodeStatus, readDailySpent, bumpDailySpent } from '../elastic/ledger';
 import { LEAF_PROMPT_SUFFIX, stripLeafTail, extractLeaf } from '../elastic/leaf';
-import { backpressureFactor } from '../elastic/cfo';
-import { TIERS, MODEL_LEAD, MODEL_LEAF, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS, SUBTEAM_MAX } from '../elastic/config';
+import { backpressureFactor, circuitBreaker } from '../elastic/cfo';
+import { TIERS, MODEL_LEAD, MODEL_LEAF, MAX_TOKENS_LEAD_REDUCE, MAX_RELAY_ROUNDS, AGENT_ABANDON_MS, RELAY_STEP_BUDGET_MS, SUBTEAM_MAX, DAILY_CAP_USD } from '../elastic/config';
 import { relayShouldContinue, buildContinuationContext, buildCarryHeader } from '../elastic/relay';
 import { buildSubteamHeader, buildSubteamContext, buildSubAgentPrompt, type SubResult } from '../elastic/subteam';
 import type { LeafOutput } from '../elastic/types';
@@ -131,6 +131,11 @@ export async function composeImpl(
   reputationBlock = '',
   recallBlock = '',
   userId: string | null = null,
+  // SELF-FUNDING CFO: the per-run budget the treasury EARNED from realized P&L.
+  // When present it caps the tier ceiling, so a run can never spend more than
+  // the company can afford. Undefined preserves the legacy behaviour byte for
+  // byte — the off-path stays untouched.
+  computeBudgetUsd?: number,
 ) {
   const emit = await makeEmitter(runId);
 
@@ -196,11 +201,13 @@ export async function composeImpl(
     // ROI learning: weight the budget toward roles that have proven valuable.
     const sbCompose = getAdminSupabase();
     const roiByRole = roiByRoleFromTitles(plan.agents, await loadRoiByTitle(sbCompose, userId));
-    // Daily-cap backpressure: tighten the run budget as the day's spend nears the cap.
-    let budget = tier.capUsd;
+    // SELF-FUNDING: the CFO's EARNED per-run budget caps the tier ceiling first —
+    // a run never spends more than the company can afford. Daily-cap backpressure
+    // then tightens further as the day's spend approaches the absolute fence.
+    let budget = computeBudgetUsd !== undefined ? Math.min(tier.capUsd, computeBudgetUsd) : tier.capUsd;
     if (userId) {
       const daily = await readDailySpent(sbCompose, userId, new Date().toISOString().slice(0, 10));
-      budget = tier.capUsd * backpressureFactor(daily.spentUsd, daily.capUsd);
+      budget = budget * backpressureFactor(daily.spentUsd, daily.capUsd);
     }
     const alloc = planElasticAllocation(plan.agents, roiByRole, budget, models);
     await persistNodes(sbCompose, runId, userId, alloc.nodes);
@@ -1172,13 +1179,79 @@ export async function finalizeImpl(
 }
 
 // LO-01: terminal failure step — keeps the run from being stuck at 'running'.
-export async function failRunImpl(runId: string, error: string) {
+export async function failRunImpl(runId: string, error: string, userId: string | null = null, spent: StepCost = ZERO_COST) {
   const sb = getAdminSupabase();
   try {
     const emit = await makeEmitter(runId);
     await emit('run_error', { error });
   } catch { /* ignore */ }
+
+  // Book whatever a partial run already spent. Without this the ledger counts
+  // only SUCCESSFUL runs, and lifetime compute silently understates reality —
+  // which matters far more now that the self-funding budget is computed as
+  // (earned pool − lifetime spend). Under-counting spend means over-allocating
+  // budget, and it is precisely the failing runs you least want to fund.
+  // Best-effort throughout; a bookkeeping failure must never mask the real error.
+  if (userId && spent.usd > 0) {
+    try {
+      await sb.from('run_costs').insert({
+        run_id: runId, user_id: userId, classification: null,
+        input_tokens: spent.in, output_tokens: spent.out,
+        cache_read_tokens: spent.cacheRead ?? 0, cache_write_tokens: spent.cacheWrite ?? 0,
+        cost_usd: Number(spent.usd.toFixed(4)), agent_count: 0,
+      });
+    } catch { /* non-fatal */ }
+    if (isElastic()) {
+      try { await bumpDailySpent(sb, userId, new Date().toISOString().slice(0, 10), spent.usd); } catch { /* non-fatal */ }
+    }
+  }
+
   await sb.from('runs').update({ status: 'failed', completed_at: new Date().toISOString() }).eq('id', runId);
+}
+
+// ─── IN-FLIGHT CIRCUIT BREAKER ────────────────────────────────────────
+// The pre-flight gate stops a run from STARTING when the company can't afford
+// it. This stops one that is already running from eating the treasury: it is
+// called BETWEEN execution layers and freezes NEW work when the run blows past
+// what it was funded, when spend velocity spikes, or when the day's cap breaks.
+//
+// It never abandons the run. The workflow skips the remaining layers and
+// synthesizes whatever it already has — a partial answer that cost what it was
+// budgeted beats no answer that cost triple.
+export async function breakerImpl(
+  runId: string, userId: string | null, runSpentUsd: number, budgetUsd?: number,
+): Promise<{ tripped: boolean; reason?: string }> {
+  if (!userId) return { tripped: false };
+  const sb = getAdminSupabase();
+  const day = new Date().toISOString().slice(0, 10);
+
+  let dailySpentUsd = 0;
+  let dailyCapUsd = DAILY_CAP_USD;
+  try {
+    const d = await readDailySpent(sb, userId, day);
+    dailySpentUsd = d.spentUsd;
+    dailyCapUsd = d.capUsd;
+  } catch { /* best-effort — a read failure must not trip the breaker */ }
+
+  // Spend velocity ($/min) against the run's wall-clock age.
+  let usdPerMin = 0;
+  try {
+    const { data } = await sb.from('runs').select('created_at').eq('id', runId).maybeSingle();
+    const startedMs = data?.created_at ? new Date(data.created_at as string).getTime() : 0;
+    const mins = startedMs ? Math.max((Date.now() - startedMs) / 60_000, 1 / 60) : 0;
+    if (mins > 0) usdPerMin = runSpentUsd / mins;
+  } catch { /* best-effort */ }
+
+  const ceiling = budgetUsd ?? TIERS[resolveTier()].capUsd;
+  const res = circuitBreaker({ runSpentUsd, tierCapUsd: ceiling, usdPerMin, dailySpentUsd, dailyCapUsd });
+  if (res.tripped) {
+    try {
+      const emit = await makeEmitter(runId);
+      await emit('breaker_tripped', { reason: res.reason, runSpentUsd: Number(runSpentUsd.toFixed(4)), ceilingUsd: Number(ceiling.toFixed(4)) });
+    } catch { /* ignore */ }
+    console.warn(`[selfhive] breaker tripped (${res.reason}) on run ${runId} — $${runSpentUsd.toFixed(4)} against a $${ceiling.toFixed(2)} ceiling`);
+  }
+  return { tripped: res.tripped, reason: res.reason };
 }
 
 export { computeExecutionLayers };

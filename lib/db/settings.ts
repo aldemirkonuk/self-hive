@@ -6,8 +6,18 @@ import { getAdminSupabase } from './supabase-admin';
 
 export interface UserSettings {
   autoMutateEnabled: boolean;
+  /**
+   * The autonomous loop's hard stop. Flipped false by the CFO breaker (API
+   * credits exhausted, a failure streak, or insolvency) and left false until the
+   * founder re-enables it.
+   *
+   * The `autonomous_enabled` column has existed in the live database since July,
+   * read by nothing — a kill switch the founder could reasonably believe worked.
+   * This is where it becomes real.
+   */
+  autonomousEnabled: boolean;
 }
-const DEFAULT_SETTINGS: UserSettings = { autoMutateEnabled: true };
+const DEFAULT_SETTINGS: UserSettings = { autoMutateEnabled: true, autonomousEnabled: true };
 
 /**
  * Read the user's settings using the SESSION client (so RLS applies).
@@ -18,11 +28,11 @@ export async function getUserSettings(userId: string): Promise<UserSettings> {
   const sb = await getServerSupabase();
   const { data } = await sb
     .from('user_settings')
-    .select('auto_mutate_enabled')
+    .select('auto_mutate_enabled, autonomous_enabled')
     .eq('user_id', userId)
     .maybeSingle();
   if (!data) return DEFAULT_SETTINGS;
-  return { autoMutateEnabled: data.auto_mutate_enabled !== false };
+  return { autoMutateEnabled: data.auto_mutate_enabled !== false, autonomousEnabled: data.autonomous_enabled !== false };
 }
 
 /**
@@ -33,11 +43,27 @@ export async function getUserSettingsAdmin(userId: string): Promise<UserSettings
   const sb = getAdminSupabase();
   const { data } = await sb
     .from('user_settings')
-    .select('auto_mutate_enabled')
+    .select('auto_mutate_enabled, autonomous_enabled')
     .eq('user_id', userId)
     .maybeSingle();
   if (!data) return DEFAULT_SETTINGS;
-  return { autoMutateEnabled: data.auto_mutate_enabled !== false };
+  return { autoMutateEnabled: data.auto_mutate_enabled !== false, autonomousEnabled: data.autonomous_enabled !== false };
+}
+
+/**
+ * Persist settings from a server-side job (admin client — no session).
+ *
+ * The CFO breaker needs this: it trips inside the autonomous cycle, which has no
+ * user session, and a breaker that cannot write is not a breaker.
+ */
+export async function setUserSettingsAdmin(userId: string, patch: Partial<UserSettings>): Promise<boolean> {
+  const sb = getAdminSupabase();
+  const row: Record<string, unknown> = { user_id: userId, updated_at: new Date().toISOString() };
+  if (typeof patch.autoMutateEnabled === 'boolean') row.auto_mutate_enabled = patch.autoMutateEnabled;
+  if (typeof patch.autonomousEnabled === 'boolean') row.autonomous_enabled = patch.autonomousEnabled;
+  const { error } = await sb.from('user_settings').upsert(row, { onConflict: 'user_id' });
+  if (error) console.warn('[selfhive] setUserSettingsAdmin failed —', error.message);
+  return !error;
 }
 
 /**
@@ -48,6 +74,7 @@ export async function setUserSettings(userId: string, patch: Partial<UserSetting
   const sb = await getServerSupabase();
   const row: Record<string, unknown> = { user_id: userId, updated_at: new Date().toISOString() };
   if (typeof patch.autoMutateEnabled === 'boolean') row.auto_mutate_enabled = patch.autoMutateEnabled;
+  if (typeof patch.autonomousEnabled === 'boolean') row.autonomous_enabled = patch.autonomousEnabled;
   const { error } = await sb.from('user_settings').upsert(row, { onConflict: 'user_id' });
   return !error;
 }

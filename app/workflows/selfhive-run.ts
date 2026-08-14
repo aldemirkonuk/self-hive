@@ -14,6 +14,10 @@ export interface WorkflowInput {
   resourceBundle?: ResourceBundle;
   reputationBlock?: string; // HIVE ECONOMY: earned per-role standing for the CoS
   recallBlock?: string; // HIVE MIND: past episodes most like this problem, illuminated
+  /** SELF-FUNDING CFO: the per-run budget the treasury EARNED. Caps the tier
+   *  ceiling so a run can never spend more than the company can afford.
+   *  Undefined preserves the legacy tier-cap behaviour exactly. */
+  computeBudgetUsd?: number;
 }
 
 /**
@@ -36,10 +40,14 @@ const sum = (a: Cost, b: Cost): Cost => ({
 export async function runSelfhiveWorkflow(input: WorkflowInput) {
   'use workflow';
 
+  // Declared OUTSIDE the try: when a step throws, whatever the run already spent
+  // still has to reach the ledger. A failed run that books $0 makes lifetime
+  // compute understate reality, and the self-funding budget over-allocates on
+  // exactly the runs that are failing.
+  let total: Cost = { usd: 0, in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
   try {
-    let total: Cost = { usd: 0, in: 0, out: 0, cacheRead: 0, cacheWrite: 0 };
 
-    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '', input.userId);
+    const composed = await composeStep(input.runId, input.problem, input.customAgents, input.costByClass, input.resourceBundle, input.trainerHistory, input.reputationBlock ?? '', input.recallBlock ?? '', input.userId, input.computeBudgetUsd);
     total = sum(total, composed.cost);
     const { plan, models, costMode, elastic } = composed;
 
@@ -80,6 +88,16 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
         );
         outputs = { ...outputs, ...layerRes.outputs };
         total = sum(total, layerRes.cost);
+      }
+
+      // IN-FLIGHT BREAKER. Checked between layers, never mid-agent: if this run
+      // has blown past what the CFO funded it, stop starting NEW work and go
+      // straight to synthesis with what we have. A partial answer at the funded
+      // price beats a complete one at triple.
+      const br = await breakerStep(input.runId, input.userId, total.usd, input.computeBudgetUsd);
+      if (br.tripped) {
+        console.warn(`[selfhive] breaker ${br.reason} — skipping ${layers.length - i - 1} remaining layer(s)`);
+        break;
       }
     }
 
@@ -145,7 +163,7 @@ export async function runSelfhiveWorkflow(input: WorkflowInput) {
     // perfectly ordinary Error — which meant every failure in the hive's history
     // was recorded as the same useless string, "workflow failed", with the real
     // cause discarded. Dig the message out of whatever shape actually arrives.
-    await failStep(input.runId, describeWorkflowError(err));
+    await failStep(input.runId, describeWorkflowError(err), input.userId, total);
     return { ok: false };
   }
 }
@@ -175,10 +193,10 @@ export function describeWorkflowError(err: unknown): string {
 }
 
 // ── Durable step boundaries — Node-heavy impl is dynamically imported here ──
-async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string, recallBlock?: string, userId?: string | null) {
+async function composeStep(runId: string, problem: string, customAgents: Record<string, Specialist>, costByClass: Record<string, number>, bundle?: ResourceBundle, trainerHistory?: string, reputationBlock?: string, recallBlock?: string, userId?: string | null, computeBudgetUsd?: number) {
   'use step';
   const { composeImpl } = await import('@/lib/jobs/step-impl');
-  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '', userId ?? null);
+  return composeImpl(runId, problem, customAgents, costByClass, bundle, trainerHistory, reputationBlock ?? '', recallBlock ?? '', userId ?? null, computeBudgetUsd);
 }
 // ELASTIC (Way 1): a folded squad — lead (lane 0) + suppressed sub-team that
 // folds into the lead's single tile. Its own durable step.
@@ -262,8 +280,16 @@ async function finalizeStep(runId: string, userId: string | null, plan: TeamPlan
   const { finalizeImpl } = await import('@/lib/jobs/step-impl');
   return finalizeImpl(runId, userId, plan, answer, report, totalCost);
 }
-async function failStep(runId: string, error: string) {
+async function failStep(runId: string, error: string, userId?: string | null, spent?: Cost) {
   'use step';
   const { failRunImpl } = await import('@/lib/jobs/step-impl');
-  return failRunImpl(runId, error);
+  return failRunImpl(runId, error, userId ?? null, spent);
+}
+
+// The in-flight breaker as its own durable step, so its decision is recorded and
+// replayed rather than re-evaluated on a retry.
+async function breakerStep(runId: string, userId: string | null, runSpentUsd: number, budgetUsd?: number) {
+  'use step';
+  const { breakerImpl } = await import('@/lib/jobs/step-impl');
+  return breakerImpl(runId, userId, runSpentUsd, budgetUsd);
 }

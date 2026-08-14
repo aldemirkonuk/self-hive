@@ -119,12 +119,31 @@ interface PreflightGate {
 }
 
 async function preflightGate(sb: ReturnType<typeof getAdminSupabase>, userId: string): Promise<PreflightGate> {
-  // Treasury signals: realized P&L (what the company earned), lifetime compute
-  // spend, and today's spend — the three inputs to the earned budget.
+  // Treasury signals: realized P&L (what the company earned), compute spend, and
+  // today's spend — the three inputs to the earned budget.
+  //
+  // SPEND IS SCOPED TO THE CURRENT LEDGER EPOCH, exactly as calibration is, and
+  // for the same reason. `realized_pnl` resets to 0 when an epoch closes, but
+  // run_costs is append-only and never did — so an all-time sum charges this
+  // treasury for compute spent months before the treasury existed. Measured on
+  // live data the day this shipped: $134.97 all-time against a $25 seed, which
+  // made the company permanently, unrecoverably insolvent and would have
+  // hard-paused the loop on its very first cycle. $4.62 since the epoch opened.
+  //
+  // A policy cannot be charged retroactively against spend incurred before the
+  // policy existed. The epoch boundary is where both ledgers restart.
   const day = new Date().toISOString().slice(0, 10);
+  const { data: lastReset } = await sb
+    .from('portfolio_resets').select('created_at')
+    .eq('user_id', userId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+  const epochStart = lastReset?.created_at ? String(lastReset.created_at) : null;
+
+  let spendQuery = sb.from('run_costs').select('cost_usd, created_at').eq('user_id', userId);
+  if (epochStart) spendQuery = spendQuery.gte('created_at', epochStart);
+
   const [pnlRes, spendRes, daily] = await Promise.all([
     sb.from('portfolio_state').select('realized_pnl').eq('user_id', userId).maybeSingle(),
-    sb.from('run_costs').select('cost_usd').eq('user_id', userId),
+    spendQuery,
     readDailySpent(sb, userId, day),
   ]);
   const realizedPnlUsd = Number(pnlRes.data?.realized_pnl ?? 0);

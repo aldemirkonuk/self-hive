@@ -142,3 +142,40 @@ test('doctrine: an insolvent company pauses rather than shipping a degraded run'
   assert.equal(runBudget(broke, valueRun({ novelty: 1, roiPrior: 10, openOpportunity: 1 }), 5), 0);
   assert.equal(shouldPause({ solvent: broke.solvent, recentFailures: 0, billingError: false }).reason, 'insolvent');
 });
+
+// ── THE BUG THAT WOULD HAVE BRICKED THE LOOP ON ITS FIRST CYCLE ─────────
+// companyBudget subtracts compute spend from an EARNED pool. run_costs is
+// append-only and spans the project's whole history; realized_pnl resets to 0
+// when a ledger epoch closes. Feed it an all-time spend figure and the company
+// is instantly, unrecoverably insolvent — measured live the day this shipped:
+// $134.97 all-time against a $25 seed, versus $4.62 since the epoch opened.
+//
+// The caller (preflightGate) scopes spend to the current epoch for this reason.
+// These pin the arithmetic that makes the scoping non-optional.
+test('treasury: all-time spend vs epoch spend is the difference between dead and solvent', () => {
+  const allTime = companyBudget({ realizedPnlUsd: 0, computeSpentUsd: 134.97, spentTodayUsd: 0 });
+  const epoch   = companyBudget({ realizedPnlUsd: 0, computeSpentUsd: 4.62,   spentTodayUsd: 0 });
+
+  assert.equal(allTime.remainingUsd, 0);
+  assert.equal(allTime.solvent, false, 'all-time spend makes a fresh epoch permanently insolvent');
+  assert.equal(shouldPause({ solvent: allTime.solvent, recentFailures: 0, billingError: false }).reason, 'insolvent');
+
+  assert.ok(epoch.remainingUsd > 20);
+  assert.equal(epoch.solvent, true, 'epoch-scoped spend leaves a healthy company running');
+  assert.equal(shouldPause({ solvent: epoch.solvent, recentFailures: 0, billingError: false }).pause, false);
+});
+
+test('treasury: remaining floors at zero and never goes negative', () => {
+  const env = companyBudget({ realizedPnlUsd: 0, computeSpentUsd: 10_000, spentTodayUsd: 0 });
+  assert.equal(env.remainingUsd, 0);
+  assert.equal(env.dailyCapUsd, 0);
+  assert.equal(env.dailyRemainingUsd, 0);
+});
+
+test('treasury: profit genuinely widens the envelope — the loop can fund itself out', () => {
+  const broke  = companyBudget({ realizedPnlUsd: 0,    computeSpentUsd: 24, spentTodayUsd: 0 });
+  const earned = companyBudget({ realizedPnlUsd: 1000, computeSpentUsd: 24, spentTodayUsd: 0 });
+  assert.equal(broke.solvent, false);
+  assert.equal(earned.solvent, true, 'realized P&L must be able to bring an insolvent company back');
+  assert.ok(earned.poolUsd > broke.poolUsd);
+});

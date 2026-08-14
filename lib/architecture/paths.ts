@@ -68,7 +68,12 @@ export const CAPABILITIES: Capability[] = [
   { id: 'distiller', matters: 'lessons are never distilled into learned overlays', markers: ['distill'] },
   { id: 'immunizer', matters: 'failure patterns are never turned into antibodies', markers: ['immuniz'] },
   { id: 'editor', matters: 'raw agent output is shipped unformatted', markers: ['editor'] },
-  { id: 'approval_gate', matters: 'self-modification happens with no audit row in /approvals', markers: ['auditAutoApproved'] },
+  // Detection note: the gate is reached either directly, or through the shared
+  // distiller/immunizer impls — which are the self-modifying writes it exists to
+  // audit, and which call auditAutoApproved internally. A path that runs those
+  // shared impls genuinely has the gate; requiring the literal symbol would
+  // report a gap that does not exist.
+  { id: 'approval_gate', matters: 'self-modification happens with no audit row in /approvals', markers: ['auditAutoApproved', 'distillImpl', 'immunizeImpl'] },
   { id: 'elastic', matters: 'no budget-governed squads or sub-teams', markers: ['isElastic'] },
 ];
 
@@ -82,11 +87,8 @@ export const KNOWN_GAPS: Record<string, Array<{ capability: string; why: string 
   // company is quietly worse when the durable workflow fails to start and the
   // direct executor picks up the run instead.
   direct: [
-    { capability: 'distiller', why: 'the run is scored but its lessons never become learned overlays, so a fallback run teaches the company nothing' },
-    { capability: 'immunizer', why: 'failure patterns from a fallback run never become antibodies, so the same failure stays repeatable' },
-    { capability: 'editor', why: 'artifacts ship unformatted on this path; cosmetic next to the others but visible to the founder' },
-    { capability: 'approval_gate', why: 'self-modification on this path lands with no change_requests row, so /approvals is not the complete history it claims to be' },
-    { capability: 'elastic', why: 'no budget-governed squads or folded sub-teams; the fallback runs a flat team regardless of problem shape' },
+    { capability: 'editor', why: 'artifacts ship unformatted on this path; cosmetic next to the others, but the founder sees the difference' },
+    { capability: 'elastic', why: 'no budget-governed squads or folded sub-teams — this lives inside composeImpl, so closing it means the direct executor calling the same compose step rather than its own orchestrator' },
   ],
 };
 

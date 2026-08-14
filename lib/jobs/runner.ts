@@ -99,6 +99,11 @@ async function executeDynamicJobInner(
   // Spawned (source='spawn') agents this run — captured from the team_plan event,
   // fed to the self-staffing loop after scoring.
   let spawnedThisRun: SpawnedAgentInput[] = [];
+  // The critic's output and the full agent roster. Both are already on the wire;
+  // this path simply never kept them, which is why it could not distil a lesson
+  // or raise an antibody from anything it ran.
+  let critique = '';
+  let planAgents: { id: string; role: string; title: string }[] = [];
 
   // Founder-created agents the Chief of Staff may choose to deploy
   const customAgents = userId ? await getCustomAgents(userId) : {};
@@ -141,6 +146,7 @@ async function executeDynamicJobInner(
         case 'trainer_done': {
           if (ev.agentId) await flushAgent(ev.agentId, true);
           if (ev.type === 'trainer_done') trainerReport = ev.artifact ?? '';
+          if (ev.agentId === 'critic') critique = ev.artifact ?? '';
           await writeEvent(ev.type, { agentId: ev.agentId, artifact: ev.artifact });
           break;
         }
@@ -164,6 +170,7 @@ async function executeDynamicJobInner(
                 successCriteria: a.successCriteria ?? '',
                 needsLiveData: Boolean(a.needsLiveData),
               }));
+            planAgents = (pl.agents ?? []).map((a) => ({ id: a.id, role: a.role ?? a.id, title: a.title }));
           }
           await writeEvent('team_plan', { plan: ev.plan });
           break;
@@ -223,6 +230,40 @@ async function executeDynamicJobInner(
       });
     } catch {
       /* non-fatal */
+    }
+  }
+
+  // ── THE LEARNING LOOP ──────────────────────────────────────────────
+  // This path used to stop here: it scored the run and then threw the lesson
+  // away. Because it is the AUTOMATIC FALLBACK when the durable workflow fails
+  // to start, every run that landed here taught the company nothing — no
+  // overlays distilled, no antibodies raised, and no change_requests row, so
+  // /approvals was not the complete history it claims to be.
+  //
+  // Both impls are shared verbatim with the workflow path rather than
+  // reimplemented, so there is one distiller and one immunizer in this codebase,
+  // not two that can drift. Both are best-effort by contract and honour the
+  // founder's auto-mutate kill switch internally.
+  if (userId && status === 'completed' && trainerReport) {
+    try {
+      const { distillImpl } = await import('./step-impl');
+      const d = await distillImpl(runId, userId, problem, classification, planAgents, trainerReport);
+      if (!d.skipped && (d.inserted || d.promoted)) {
+        await writeEvent('distilled', { inserted: d.inserted, promoted: d.promoted });
+      }
+    } catch (e) {
+      console.warn('[selfhive] fallback distil failed —', e instanceof Error ? e.message : e);
+    }
+  }
+  if (userId && status === 'completed' && critique) {
+    try {
+      const { immunizeImpl } = await import('./step-impl');
+      const im = await immunizeImpl(runId, userId, problem, classification, critique);
+      if (!im.skipped && (im.inserted || im.promoted)) {
+        await writeEvent('immunized', { inserted: im.inserted, promoted: im.promoted });
+      }
+    } catch (e) {
+      console.warn('[selfhive] fallback immunize failed —', e instanceof Error ? e.message : e);
     }
   }
 

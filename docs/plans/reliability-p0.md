@@ -4,6 +4,21 @@ Planning document. **No implementation yet** — this records the forensics so t
 conclusion survives the session, and specifies the fix precisely enough that
 executing it is mechanical.
 
+## Status: ON HOLD (founder decision, 2026-08-14)
+
+The founder reviewed this plan and chose to **hold**: nothing in P0–P5 is to be
+implemented until they say otherwise. This document is the shelf it sits on.
+
+One decision was ruled on in advance, so it does not need re-litigating when work
+resumes:
+
+> **P1 — the 149 `"workflow failed"` rows are to be ATTRIBUTED, not deleted.**
+> Two labels: `api_credits_exhausted` (138) and `tail_failure` (15). Deleting
+> them was the founder's original instinct and was explicitly withdrawn in favour
+> of attribution — it would have erased the very duration split that located the
+> bug, and would not have moved the completion rate anyway, since that is
+> computed from `runs.status` and not from `run_events`.
+
 ## The headline number was misleading
 
 309 runs, 155 completed = **50%**. That number is real but it is not one problem.
